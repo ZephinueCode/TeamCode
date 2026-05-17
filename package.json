@@ -1,0 +1,34 @@
+{
+  "name": "teamcode",
+  "version": "0.1.0",
+  "description": "Committee-mode AI coding agent for multi-model deployments",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "teamcode": "./bin/teamcode.cmd"
+  },
+  "scripts": {
+    "dev": "bun run --conditions=browser src/index.ts",
+    "typecheck": "bun run tsc --noEmit",
+    "test": "bun test --timeout 30000"
+  },
+  "dependencies": {
+    "@ai-sdk/openai-compatible": "^2.0.41",
+    "@opentui/core": "^0.2.11",
+    "ai": "^6.0.168",
+    "cross-spawn": "^7.0.6",
+    "drizzle-orm": "^1.0.0-beta.19",
+    "effect": "4.0.0-beta.65",
+    "glob": "^13.0.5",
+    "jsonc-parser": "^3.3.1",
+    "remeda": "^2.26.0",
+    "yargs": "^18.0.0"
+  },
+  "devDependencies": {
+    "@tsconfig/bun": "^1.0.9",
+    "@types/bun": "^1.3.12",
+    "@types/cross-spawn": "^6.0.6",
+    "@types/yargs": "^17.0.35",
+    "typescript": "^5.8.2"
+  }
+}

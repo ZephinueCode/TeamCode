@@ -1,0 +1,84 @@
+{
+  // ── 三模型配置 — 每个模型独立的 endpoint / model / apiKey ──
+  "models": {
+    "pm": {
+      "provider": "openai-compatible",
+      "model": "deepseek-v4-pro",
+      "endpoint": "https://api.deepseek.com",
+      "apiKey": "${TEAMCODE_PM_API_KEY}",
+      "temperature": 0.5,
+      "maxTokens": 65536
+    },
+    "coder": {
+      "provider": "openai-compatible",
+      "model": "deepseek-v4-pro",
+      "endpoint": "https://api.deepseek.com",
+      "apiKey": "${TEAMCODE_CODER_API_KEY}",
+      "temperature": 0.5,
+      "maxTokens": 65536
+    },
+    "intern": {
+      "provider": "openai-compatible",
+      "model": "deepseek-v4-flash",
+      "endpoint": "https://api.deepseek.com",
+      "apiKey": "${TEAMCODE_INTERN_API_KEY}",
+      "temperature": 0.1,
+      "maxTokens": 16384
+    }
+  },
+
+  // ── 委员会协议 ──
+  "committee": {
+    "deliberation": {
+      "maxRounds": 3,
+      "mode": "consensus",
+      "timeout": 600000
+    },
+    "execution": {
+      "pmReview": "async",
+      "maxReviewRounds": 2,
+      "interruptOnBlocker": true,
+      "coderAutonomy": "full"
+    },
+    "compaction": {
+      "auto": true,
+      "tailTurns": 3,
+      "reservedTokens": 20000,
+      "contextLimit": 200000,   // 模型上下文窗口大小
+      "overflowRatio": 0.75,
+      "committeeTemplate": true
+    }
+  },
+
+  // ── 权限 ──
+  "permission": {
+    "pm": {
+      "read": "allow",
+      "glob": "allow",
+      "grep": "allow",
+      "skill": "allow",
+      "task": "allow",
+      "write": "deny",
+      "edit": "deny",
+      "shell": "deny"
+    },
+    "coder": {
+      "*": "allow"
+    },
+    "intern": {
+      "read": "allow",
+      "glob": "allow",
+      "grep": "allow",
+      "write": "deny",
+      "edit": "deny",
+      "shell": "deny",
+      "task": "deny"
+    }
+  },
+
+  // ── Skill 路径 ──
+  "skills": {
+    "paths": [".teamcode/skills"],
+    "urls": []
+  }
+}
