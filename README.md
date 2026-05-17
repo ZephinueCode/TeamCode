@@ -30,7 +30,7 @@ TeamCode is **Specifically optimized** edge development scenarios (e.g. DGX Spar
 ### Install
 
 ```bash
-git clone https://github.com/your-org/teamcode.git
+git clone https://github.com/ZephinueCode/TeamCode.git
 cd teamcode
 bun install
 ```
@@ -74,6 +74,10 @@ bun run dev
 
 # With a custom config
 bun run dev --config ./my-project/teamcode.jsonc
+
+# Install first, start anywhere
+./install.sh # Linux / MacOS
+./install.ps1 # Windows
 ```
 
 ## Architecture
