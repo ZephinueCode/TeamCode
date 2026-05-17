@@ -28,7 +28,7 @@ import { type Def as ToolDef } from "../tool/tool"
 import { toAITool } from "../llm/llm"
 import { buildEnvironment, buildCommitteeContext } from "../session/system"
 import { detectConsensus, nextPhase, type CommitteePhase, type PlanArtifact, type ReviewArtifact, type CoderProgress } from "./protocol"
-import { buildCompactionPrompt, mergeCompactions, type CommitteeCompaction } from "./compaction"
+import { buildCompactionPrompt } from "./compaction"
 import * as Tui from "../ui/tui"
 import { runtimeConfig } from "../config/runtime"
 import { matchCommands } from "../ui/commands"
@@ -217,6 +217,19 @@ export function runCommittee(opts?: {
               w("✓ " + String(r.output).slice(0, 120).replace(/\n/g, " "), "system")
             }
 
+            // ── Log Coder actions for execution compaction ──
+            if (label === "coder" && coderIsExecuting) {
+              const actionPath = def.id === "task"
+                ? String((args as any)?.description ?? "").slice(0, 40)
+                : argPath
+              coderActions.push({
+                tool: def.id,
+                path: actionPath,
+                summary: r.title.slice(0, 80),
+                ts: Date.now(),
+              })
+            }
+
             // ── After Coder writes a file → fork PM auto-review (execution only) ──
             if (label === "coder" && (def.id === "write" || def.id === "edit") && coderIsExecuting) {
               const filePath = (args as any)?.filePath ?? ""
@@ -239,7 +252,7 @@ export function runCommittee(opts?: {
     // ── Token tracking ──
     let totalTokensUsed = 0
     let needsCompaction = false
-    let contextLimit = cfg.committee?.compaction?.contextLimit ?? 128_000
+    let contextLimit = cfg.committee?.compaction?.contextLimit ?? 200_000
     const COMPACTION_BUFFER = cfg.committee?.compaction?.reservedTokens ?? 20_000
     const OVERFLOW_RATIO = cfg.committee?.compaction?.overflowRatio ?? 0.85
 
@@ -285,8 +298,9 @@ export function runCommittee(opts?: {
             if (e?.type === "finish-step" && (e as any).usage) {
               flushReasoningLine()
               const u = (e as any).usage
-              totalTokensUsed += (u.inputTokens ?? 0) + (u.outputTokens ?? 0) + (u.cachedInputTokens ?? 0)
-              if (agent === "pm") pmTokens += (u.inputTokens ?? 0) + (u.outputTokens ?? 0) + (u.cachedInputTokens ?? 0)
+              const textOut = u.outputTokenDetails?.textTokens ?? u.outputTokens ?? 0
+              totalTokensUsed += (u.inputTokens ?? 0) + textOut
+              if (agent === "pm") pmTokens += (u.inputTokens ?? 0) + textOut
               if (isOverflow()) needsCompaction = true
             }
           })),
@@ -308,18 +322,33 @@ export function runCommittee(opts?: {
       })
     }
 
-    function drainText(s: Stream.Stream<any, any>): Effect.Effect<void> {
-      return s.pipe(
-        Stream.runDrain,
-        Effect.catchCause((cause) => Effect.sync(() => {
-          const err = Cause.squash(cause)
-          if (!isAborted(err)) {
-            const msg = err instanceof Error ? err.message : String(err)
-            w(`✗ Coder execution error: ${msg.slice(0, 200)}`, "error")
-          }
-        })),
-        Effect.asVoid,
-      )
+    // Drain a Coder stream with overflow detection. Returns "overflow" if
+    // the Coder's context grew past the threshold (caller should compact and retry).
+    function drainWithOverflowCheck(s: Stream.Stream<any, any>): Effect.Effect<string> {
+      let overflowed = false
+      return Effect.gen(function* () {
+        yield* s.pipe(
+          Stream.tap((e: any) => Effect.sync(() => {
+            if (!overflowed && e?.type === "finish-step" && (e as any).usage) {
+              const u = (e as any).usage
+              const textOut = u.outputTokenDetails?.textTokens ?? u.outputTokens ?? 0
+              totalTokensUsed += (u.inputTokens ?? 0) + textOut
+              if (isOverflow()) {
+                overflowed = true
+              }
+            }
+          })),
+          Stream.runDrain,
+          Effect.catchCause((cause) => Effect.sync(() => {
+            const err = Cause.squash(cause)
+            if (!isAborted(err)) {
+              const msg = err instanceof Error ? err.message : String(err)
+              w(`✗ Coder execution error: ${msg.slice(0, 200)}`, "error")
+            }
+          })),
+        )
+        return overflowed ? "overflow" : "done"
+      })
     }
 
     // ── Compaction ──
@@ -327,58 +356,39 @@ export function runCommittee(opts?: {
       const beforeTokens = estimateTokens(history)
       emit("compaction", "🔄", "Compaction starting", `${Math.round(beforeTokens / 1000)}k tokens`, "running", "system")
 
-      const pmCompactStream = llm.stream({
-        sessionID: "compaction-pm", agent: { name: "pm", temperature: 0.3 },
+      const compactStream = llm.stream({
+        sessionID: "compaction", agent: { name: "pm", temperature: 0.3 },
         model: yield* getPmModel(), system: pmEnv,
         messages: [{ role: "system", content: buildCompactionPrompt("pm", { plan, review, currentPhase: phase, completedFiles: coderProgress.completedFiles, failedFiles: coderProgress.failedFiles, pmMessages: history, coderMessages: [] }) }] as any,
         tools: {}, maxOutputTokens: 2048,
         abortSignal: Tui.pmAbortSignal(),
       })
-      const pmContext = yield* collectText(pmCompactStream, "pm")
-
-      const coderCompactStream = llm.stream({
-        sessionID: "compaction-coder", agent: { name: "coder", temperature: 0.3 },
-        model: yield* getCoderModel(), system: coderEnv,
-        messages: [{ role: "system", content: buildCompactionPrompt("coder", { plan, review, currentPhase: phase, completedFiles: coderProgress.completedFiles, failedFiles: coderProgress.failedFiles, pmMessages: history, coderMessages: [] }) }] as any,
-        tools: {}, maxOutputTokens: 2048,
-        abortSignal: Tui.coderAbortSignal(),
-      })
-      const coderContext = yield* collectText(coderCompactStream, "coder")
-
-      const merged = mergeCompactions(pmContext, coderContext, "main")
-      lastCompaction = merged
+      const summary = yield* collectText(compactStream, "pm")
 
       // ── Apply compaction: trim history, keep first + last, inject summary ──
       const compactionSystemMsg: ModelMessage = {
         role: "system",
         content: [
           "<compaction_result>",
-          "The conversation above has been compacted to save context. Below is a summary of everything important:",
-          "",
-          merged.sharedConsensus,
-          "",
-          merged.pmContext,
-          "",
-          merged.coderContext,
+          summary,
           "</compaction_result>",
           "",
-          "Continue from where you left off. The user's original intent and the current state are preserved above.",
+          "Continue from where you left off. The user's intent and current state are preserved above.",
         ].join("\n"),
       }
 
       // Keep: first user message + compaction result + last 2 message pairs
       const firstUser = history.find((m) => m.role === "user")
-      const recent = history.slice(-4) // last 2 pairs (user + assistant × 2)
+      const recent = history.slice(-4)
       history.length = 0
       if (firstUser) history.push(firstUser)
       history.push(compactionSystemMsg)
       history.push(...recent)
 
       const afterTokens = estimateTokens(history)
-      totalTokensUsed = afterTokens // Reset token counter to match new history size
+      totalTokensUsed = afterTokens
       needsCompaction = false
       emit("compaction", "📦", "Compaction done", `${Math.round(beforeTokens / 1000)}k → ${Math.round(afterTokens / 1000)}k tokens`, "done", "system")
-      return merged
     })
 
     // ── Compaction trigger — checks flag set mid-stream ──
@@ -394,7 +404,8 @@ export function runCommittee(opts?: {
     let plan: PlanArtifact | undefined
     let review: ReviewArtifact | undefined
     const coderProgress: CoderProgress = { currentFile: null, completedFiles: [], failedFiles: [], pmFeedback: [], internTasks: [] }
-    let lastCompaction: CommitteeCompaction | undefined
+    // Coder execution action log — preserved across compaction restarts
+    const coderActions: Array<{ tool: string; path: string; summary: string; ts: number }> = []
     const history: ModelMessage[] = []
     let coderSessionID: string | undefined
 
@@ -592,13 +603,16 @@ export function runCommittee(opts?: {
           w("◆ CODER — Reviewing Plan", "pm-header")
           w("─".repeat(40), "system")
 
+          // Compact before handing context to Coder — review may read many files
+          yield* maybeCompact
+
           const coderSess = yield* session.create({ parentID: "main", title: "Coder review", agent: "coder", directory: cwd, modelProvider: "coder", modelID: cfg.models.coder.model })
           coderSessionID = coderSess.id
 
           const coderMessages: ModelMessage[] = [
             ...history.slice(-6),
-            { role: "system", content: "You are in review phase. Only review the plan — do not write or edit any files. Use read, glob, and grep to check the codebase. Then output your review in the format below." },
-            { role: "user", content: `Review this plan:\n\n${plan?.approach ?? plan?.summary ?? "(see conversation above)"}\n\nRead relevant files first. If the plan has issues, say "disagree" or "agree_with_changes". Say "agree" only if the plan has no issues.\n\nOutput format:\nOverall: agree / agree_with_changes / disagree\nComments:\n- topic: your assessment — severity: blocker | suggestion\nChanges:\n- section: change X to Y because reason` },
+            { role: "system", content: "You are in review phase. Move fast — your goal is to catch blockers, not to perfect the plan. Spend 2-3 minutes max. Check 2-3 key files with grep/read, then decide." },
+            { role: "user", content: `Review this plan:\n\n${plan?.approach ?? plan?.summary ?? "(see conversation above)"}\n\nBe decisive. Do not read exhaustively — spot-check file paths and approach. If the general direction is sound, approve it. Only push back on real problems (wrong file, missing edge case, architectural risk). Minor issues can be fixed during execution.\n\nOutput format:\nOverall: agree / agree_with_changes / disagree\nComments (blockers only, skip if none):\n- topic: your assessment — severity: blocker | suggestion` },
           ]
 
           const coderReviewStream = llm.stream({
@@ -737,6 +751,10 @@ export function runCommittee(opts?: {
           w("")
           emit("phase-enter", "🚀", "Coder executing", "async", "running", "coder")
 
+          // Compact PM history before handing context to Coder — the Coder
+          // needs headroom for reading files during execution.
+          yield* maybeCompact
+
           const execMessages: ModelMessage[] = [
             ...history.slice(-6),
             { role: "system", content: "Execution phase. Use write for new files, edit for changes. Read each file before editing. Write every file listed in the plan." },
@@ -751,16 +769,79 @@ export function runCommittee(opts?: {
             coderStartedAt = Date.now()
             w("◆ CODER executing (watch tools below)", "pm-header")
 
-            const coderExecStream = llm.stream({
-              sessionID: coderSessionID ?? "coder",
-              agent: { name: "coder", temperature: cfg.models.coder.temperature ?? 0.5 },
-              model: yield* getCoderModel(), system: coderEnv,
-              messages: execMessages, tools: buildTools(coderToolDefs, "coder"),
-              maxOutputTokens: cfg.models.coder.maxTokens ?? 200000,
-              abortSignal: Tui.coderAbortSignal(),
-            })
-            yield* drainText(coderExecStream)
-            Tui.clearCoderAbort()
+            let coderMessages = execMessages
+            const MAX_RESTARTS = 3
+            let restartCount = 0
+
+            while (restartCount <= MAX_RESTARTS) {
+              // Clear action log for this attempt (keep previous file progress)
+              coderActions.length = 0
+
+              const coderExecStream = llm.stream({
+                sessionID: coderSessionID ?? "coder",
+                agent: { name: "coder", temperature: cfg.models.coder.temperature ?? 0.5 },
+                model: yield* getCoderModel(), system: coderEnv,
+                messages: coderMessages, tools: buildTools(coderToolDefs, "coder"),
+                maxOutputTokens: cfg.models.coder.maxTokens ?? 200000,
+                abortSignal: Tui.coderAbortSignal(),
+              })
+              const result = yield* drainWithOverflowCheck(coderExecStream)
+              Tui.clearCoderAbort()
+
+              if (result === "overflow" && restartCount < MAX_RESTARTS) {
+                restartCount++
+                w(`⚡ Coder overflow → compacting (restart ${restartCount}/${MAX_RESTARTS})`, "warning")
+
+                // Build compacted resume context from action log
+                const actionLog = coderActions
+                  .map((a) => `[${a.tool}] ${a.path}: ${a.summary}`)
+                  .join("\n")
+                const completedList = coderProgress.completedFiles.length
+                  ? coderProgress.completedFiles.join(", ")
+                  : "(none yet)"
+
+                const compactPrompt = [
+                  "You are the PM. Produce a terse checkpoint for the Coder to resume execution.",
+                  "",
+                  "### Completed files",
+                  completedList,
+                  "",
+                  "### Actions taken this session",
+                  actionLog || "(none yet)",
+                  "",
+                  "### Plan being executed",
+                  plan?.summary ?? "(none)",
+                  plan?.approach ?? "",
+                  "",
+                  "Output a single paragraph telling the Coder exactly where to resume. List which files are done, which are pending, and what to do next. Keep it under 300 words.",
+                ].join("\n")
+
+                const compactStream = llm.stream({
+                  sessionID: "compact-coder", agent: { name: "pm", temperature: 0.2 },
+                  model: yield* getPmModel(), system: pmEnv,
+                  messages: [{ role: "system", content: compactPrompt }] as any,
+                  tools: {}, maxOutputTokens: 600,
+                })
+                const resumePlan = yield* collectText(compactStream, "pm")
+
+                // Rebuild messages: compacted resume + fresh execution instruction
+                coderMessages = [
+                  { role: "system", content: resumePlan },
+                  { role: "user", content: "Continue execution from where you left off. Files already completed are listed above — do NOT redo them. Skip ahead to the next pending file and continue." },
+                ]
+                w("● Coder restarted with compacted context", "coder")
+                continue
+              }
+
+              if (result === "overflow") {
+                w("✗ Coder overflowed after max restarts — aborting", "error")
+                coderIsExecuting = false
+                return
+              }
+
+              // Execution completed successfully
+              break
+            }
 
             coderLastAction = "summarizing..."
             coderStartedAt = Date.now()
@@ -771,7 +852,7 @@ export function runCommittee(opts?: {
               agent: { name: "coder", temperature: 0.3 },
               model: yield* getCoderModel(), system: coderEnv,
               messages: [
-                ...execMessages.slice(-3),
+                ...coderMessages.slice(-3),
                 { role: "assistant", content: "I have finished writing all the files." } as any,
                 { role: "user", content: "Output a brief, casual summary of what you just implemented. 2-4 bullet points. End with a short sign-off like 'All done!' or 'That should fix it!'. Do NOT output code." } as any,
               ],
