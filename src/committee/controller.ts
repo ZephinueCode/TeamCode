@@ -14,7 +14,7 @@
  *   "warning"   → bold yellow
  *   "error"     → red
  */
-import { Effect, Stream } from "effect"
+import { Cause, Effect, Stream } from "effect"
 import { randomUUID } from "crypto"
 import { spawn } from "cross-spawn"
 import type { ModelMessage } from "ai"
@@ -90,6 +90,7 @@ export function runCommittee(opts?: {
     // ── Intern dispatch ──
     function dispatchIntern(description: string, prompt: string): Effect.Effect<string> {
       return Effect.gen(function* () {
+        internDescription = description.length > 30 ? description.slice(0, 30) + "…" : description
         emit("intern-dispatch", "⚡", `Intern: ${description}`, prompt.slice(0, 80), "running", "intern")
         const stream = llm.stream({
           sessionID: "intern-" + randomUUID().slice(0, 8),
@@ -101,6 +102,7 @@ export function runCommittee(opts?: {
           maxOutputTokens: cfg.models.intern?.maxTokens ?? 4096,
         })
         const result = yield* collectText(stream, "intern")
+        internDescription = ""
         emit("intern-dispatch", "⚡", "Intern done", result.slice(0, 80), "done", "intern")
         return result
       })
@@ -236,39 +238,88 @@ export function runCommittee(opts?: {
 
     // ── Token tracking ──
     let totalTokensUsed = 0
+    let needsCompaction = false
     let contextLimit = cfg.committee?.compaction?.contextLimit ?? 128_000
     const COMPACTION_BUFFER = cfg.committee?.compaction?.reservedTokens ?? 20_000
+    const OVERFLOW_RATIO = cfg.committee?.compaction?.overflowRatio ?? 0.85
 
     function usable() { return contextLimit - COMPACTION_BUFFER }
-    function isOverflow() { return contextLimit > 0 && totalTokensUsed >= usable() }
+    function overflowThreshold() { return Math.floor(contextLimit * OVERFLOW_RATIO) }
+    function isOverflow() { return contextLimit > 0 && totalTokensUsed >= overflowThreshold() }
 
     function isAborted(err: unknown): boolean {
       return err instanceof Error && (err.name === "AbortError" || err.message?.includes("abort"))
     }
 
+    let reasoningBuffer = ""   // full reasoning text (for context)
+    let reasoningLine = ""     // partial line being built
+    function flushReasoningLine() {
+      if (reasoningLine) {
+        w(reasoningLine, "reasoning")
+        reasoningLine = ""
+      }
+    }
     function collectText(s: Stream.Stream<StreamEvent, Error>, agent: string): Effect.Effect<string> {
       return Effect.gen(function* () {
         let text = ""
+        reasoningBuffer = ""
+        reasoningLine = ""
+        let streamError = ""
         if (agent === "pm") { pmThinking = true; pmStartedAt = Date.now(); pmTokens = 0 }
+        if (agent === "intern") { internThinking = true; internStartedAt = Date.now() }
         yield* s.pipe(
           Stream.tap((e: any) => Effect.sync(() => {
-            if (e?.type === "text-delta") text += (e.text ?? "")
+            if (e?.type === "reasoning-delta") {
+              reasoningBuffer += (e.text ?? "")
+              reasoningLine += (e.text ?? "")
+              if (reasoningLine.includes("\n")) {
+                const lines = reasoningLine.split("\n")
+                reasoningLine = lines.pop() ?? ""
+                for (const l of lines) w(l, "reasoning")
+              }
+            }
+            if (e?.type === "text-delta") {
+              flushReasoningLine()
+              text += (e.text ?? "")
+            }
             if (e?.type === "finish-step" && (e as any).usage) {
+              flushReasoningLine()
               const u = (e as any).usage
               totalTokensUsed += (u.inputTokens ?? 0) + (u.outputTokens ?? 0) + (u.cachedInputTokens ?? 0)
               if (agent === "pm") pmTokens += (u.inputTokens ?? 0) + (u.outputTokens ?? 0) + (u.cachedInputTokens ?? 0)
+              if (isOverflow()) needsCompaction = true
             }
           })),
           Stream.runDrain,
-          Effect.catchCause(() => Effect.void),
+          Effect.catchCause((cause) => Effect.sync(() => {
+            const err = Cause.squash(cause)
+            streamError = isAborted(err) ? "ABORTED" : (err instanceof Error ? err.message : String(err))
+          })),
         )
         if (agent === "pm") pmThinking = false
+        if (agent === "intern") { internThinking = false; internStartedAt = 0 }
+        if (streamError === "ABORTED") return "[ABORTED]"
+        if (streamError) {
+          w(`✗ ${agent} error: ${streamError.slice(0, 200)}`, "error")
+          return `[Error: ${streamError}]`
+        }
+        flushReasoningLine()
         return text || "[No response]"
       })
     }
 
     function drainText(s: Stream.Stream<any, any>): Effect.Effect<void> {
-      return s.pipe(Stream.runDrain, Effect.catchCause(() => Effect.void), Effect.asVoid)
+      return s.pipe(
+        Stream.runDrain,
+        Effect.catchCause((cause) => Effect.sync(() => {
+          const err = Cause.squash(cause)
+          if (!isAborted(err)) {
+            const msg = err instanceof Error ? err.message : String(err)
+            w(`✗ Coder execution error: ${msg.slice(0, 200)}`, "error")
+          }
+        })),
+        Effect.asVoid,
+      )
     }
 
     // ── Compaction ──
@@ -325,8 +376,17 @@ export function runCommittee(opts?: {
 
       const afterTokens = estimateTokens(history)
       totalTokensUsed = afterTokens // Reset token counter to match new history size
+      needsCompaction = false
       emit("compaction", "📦", "Compaction done", `${Math.round(beforeTokens / 1000)}k → ${Math.round(afterTokens / 1000)}k tokens`, "done", "system")
       return merged
+    })
+
+    // ── Compaction trigger — checks flag set mid-stream ──
+    const maybeCompact = Effect.gen(function* () {
+      if (needsCompaction && cfg.committee?.compaction?.auto !== false) {
+        w(`⚡ Context ${Math.round(totalTokensUsed / 1000)}k / ${Math.round(overflowThreshold() / 1000)}k (${Math.round(OVERFLOW_RATIO * 100)}%) → compacting...`, "warning")
+        yield* runCompaction
+      }
     })
 
     // ── State ──
@@ -366,7 +426,9 @@ export function runCommittee(opts?: {
     function showHeader() {
       const pmCfg = runtimeConfig.get("pm", cfg.models.pm)
       const coderCfg = runtimeConfig.get("coder", cfg.models.coder)
-      w(`PM: ${pmCfg.model}  │  Coder: ${coderCfg.model}`, "system")
+      const internCfg = cfg.models.intern
+      const internModel = internCfg?.endpoint && internCfg.model ? internCfg.model : pmCfg.model
+      w(`PM: ${pmCfg.model}  │  Intern: ${internModel}  │  Coder: ${coderCfg.model}`, "system")
       w("/help /apikey /baseurl /review /compact /copy /pmreview /maxinterns /exit", "command")
       w("")
     }
@@ -379,6 +441,9 @@ export function runCommittee(opts?: {
     let pmThinking = false
     let pmStartedAt = 0
     let pmTokens = 0
+    let internThinking = false
+    let internStartedAt = 0
+    let internDescription = ""
 
     function updateTuiStatus() {
       const spin = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"][Math.floor(Date.now() / 200) % 10]!
@@ -392,6 +457,18 @@ export function runCommittee(opts?: {
         Tui.setPmStatus(spin + " PM: thinking" + tokStr + " · " + timeStr)
       } else {
         Tui.setPmStatus("PM: idle")
+      }
+
+      // Intern status — left side, rendered in gold (#E3B341) by tui.ts
+      if (internThinking && internStartedAt > 0) {
+        const elapsed = Math.floor((Date.now() - internStartedAt) / 1000)
+        const min = Math.floor(elapsed / 60); const sec = elapsed % 60
+        const timeStr = min > 0 ? `${min}m ${sec}s` : `${sec}s`
+        Tui.setInternStatus(spin + " Intern: " + (internDescription || "reading") + " · " + timeStr)
+      } else if (internDescription) {
+        Tui.setInternStatus("⚡ Intern: " + internDescription)
+      } else {
+        Tui.setInternStatus("")
       }
 
       // Coder status — right side, rendered in Coder green (#3FB950) by tui.ts
@@ -488,10 +565,7 @@ export function runCommittee(opts?: {
           w("")
           history.push({ role: "assistant", content: text })
 
-          if (isOverflow() && cfg.committee?.compaction?.auto !== false) {
-            w(`⚡ Context ${Math.round(totalTokensUsed / 1000)}k / ${Math.round(usable() / 1000)}k usable → compacting...`, "warning")
-            yield* runCompaction
-          }
+          yield* maybeCompact
 
           // submit_to_coder tool was called → transition to coder_review
           if (submittedPlan) {
@@ -543,6 +617,8 @@ export function runCommittee(opts?: {
             break
           }
 
+          yield* maybeCompact
+
           review = parseReview(text)
           w(text, "pm")
           w("")
@@ -578,6 +654,7 @@ export function runCommittee(opts?: {
             })
             const pmResp = yield* collectText(pmStream, "pm")
             if (pmResp === "[ABORTED]") { phase = "idle"; break }
+            yield* maybeCompact
 
             const coderStream = llm.stream({
               sessionID: coderSessionID ?? "coder", agent: { name: "coder" },
@@ -593,10 +670,7 @@ export function runCommittee(opts?: {
             history.push({ role: "assistant", content: pmResp })
             history.push({ role: "user", content: coderResp })
 
-            if (isOverflow() && cfg.committee?.compaction?.auto !== false) {
-              w("⚡ Compacting...", "warning")
-              yield* runCompaction
-            }
+            yield* maybeCompact
 
             if (coderResp.startsWith("CONSENSUS")) { phase = "awaiting_approval"; break }
             if (round >= maxRounds) { phase = "awaiting_decision"; break }

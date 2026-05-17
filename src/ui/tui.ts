@@ -26,8 +26,10 @@ const ROLE_FG: Record<string, string> = {
   pm:        "#A5D6FF",
   "pm-header": "#58A6FF",
   coder:     "#3FB950",
+  intern:    "#E3B341",
   user:      "#E6EDF3",
   system:    "#8B949E",
+  reasoning: "#6E7681",
   command:   "#BC8CFF",
   warning:   "#D29922",
   error:     "#F85149",
@@ -38,6 +40,7 @@ const ROLE_FG: Record<string, string> = {
 let renderer: any
 let scrollBox: ScrollBoxRenderable
 let pmStatusText: TextRenderable
+let internStatusText: TextRenderable
 let coderText: TextRenderable
 let inputComp: InputRenderable
 let pendingResolve: ((s: string) => void) | null = null
@@ -133,6 +136,15 @@ export async function init() {
     content: "PM: idle",
     fg: ROLE_FG["pm-header"],  // #58A6FF — standard PM blue
     attributes: TextAttributes.BOLD,
+    flexShrink: 0,
+  })
+
+  // ═══ Intern status (left, gold) ─────────────────────────── ═══
+  internStatusText = new TextRenderable(renderer, {
+    content: "",
+    fg: ROLE_FG.intern,  // #E3B341 — warm gold
+    attributes: TextAttributes.BOLD,
+    flexShrink: 0,
   })
 
   // ═══ Coder status (right, green) ───────────────────────── ═══
@@ -140,6 +152,7 @@ export async function init() {
     content: "Coder: idle",
     fg: ROLE_FG.coder,  // #3FB950 — standard coder green
     attributes: TextAttributes.BOLD,
+    flexShrink: 0,
   })
 
   // ═══ Status row ─────────────────────────────────────────── ═══
@@ -147,8 +160,10 @@ export async function init() {
     flexDirection: "row", flexShrink: 0,
     justifyContent: "space-between",
     paddingLeft: 1, paddingRight: 1,
+    gap: 2,
   })
   statusRow.add(pmStatusText)
+  statusRow.add(internStatusText)
   statusRow.add(coderText)
 
   // ═══ Divider lines ──────────────────────────────────────── ═══
@@ -269,6 +284,7 @@ export function write(rawText: string, role?: string) {
   const attrs =
     role === "pm-header" || role === "coder" ? TextAttributes.BOLD
     : role === "warning" ? TextAttributes.BOLD
+    : role === "reasoning" ? TextAttributes.DIM | TextAttributes.ITALIC
     : role === "system" ? TextAttributes.DIM
     : TextAttributes.NONE
 
@@ -311,6 +327,11 @@ function makeText(content: string, role: string): TextRenderable {
 // Update PM status text (left side of status row, PM blue)
 export function setPmStatus(s: string) {
   try { pmStatusText.content = s } catch {}
+}
+
+// Update Intern status text (left side of status row, gold)
+export function setInternStatus(s: string) {
+  try { internStatusText.content = s } catch {}
 }
 
 // Update Coder status text (right side of status row, Coder green)

@@ -2,7 +2,6 @@ import { Effect, Layer, Context } from "effect"
 import * as fs from "fs/promises"
 import path from "path"
 import os from "os"
-import { fileURLToPath } from "url"
 import { parse as parseJsonc } from "jsonc-parser"
 import { Info, defaults } from "../committee/config"
 import type { Info as CommitteeConfig } from "../committee/config"
@@ -74,46 +73,30 @@ function deepMerge(a: Record<string, any>, b: Record<string, any>): Record<strin
 
 async function ensureGlobalConfig(): Promise<void> {
   const file = path.join(GLOBAL_DIR, PROJECT_FILE)
-  let needsRewrite = false
-
   try {
     await fs.access(file)
-    // File exists — check if it has essential fields
-    const text = await fs.readFile(file, "utf-8")
-    const parsed = parseJsonc(text) as Record<string, any>
-    const pm = parsed?.models?.pm as Record<string, any> | undefined
-    if (!pm?.model || !pm?.endpoint) needsRewrite = true
+    return // file exists — never overwrite user settings
   } catch {
-    needsRewrite = true
-  }
-
-  if (!needsRewrite) return
-
-  // Write a complete config
-  const exampleFile = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..", PROJECT_FILE)
-  try {
+    // create a minimal starter file; deepMerge fills defaults for missing fields
     await fs.mkdir(GLOBAL_DIR, { recursive: true })
-    await fs.copyFile(exampleFile, file)
-  } catch {
-    const minimal = JSON.stringify(defaults, null, 2)
-    await fs.mkdir(GLOBAL_DIR, { recursive: true })
-    await fs.writeFile(file, minimal, "utf-8")
+    await fs.writeFile(file, "{\n  // TeamCode user config — use /baseurl, /apikey, /model to configure\n}\n", "utf-8")
   }
 }
 
 async function loadAllConfigs(cwd: string): Promise<CommitteeConfig> {
-  // Ensure a global config exists before loading
   await ensureGlobalConfig()
 
   let result: Record<string, any> = { ...defaults }
 
-  for (const name of [PROJECT_FILE, "config.json"]) {
-    result = deepMerge(result, await loadFile(path.join(GLOBAL_DIR, name)))
-  }
-
+  // Project config first (lower priority — provides project-specific defaults)
   const projectFile = await findProjectConfig(cwd)
   if (projectFile) {
     result = deepMerge(result, await loadFile(projectFile))
+  }
+
+  // Global user config on top (highest priority — slash commands persist here)
+  for (const name of [PROJECT_FILE, "config.json"]) {
+    result = deepMerge(result, await loadFile(path.join(GLOBAL_DIR, name)))
   }
 
   return result as CommitteeConfig
