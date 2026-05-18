@@ -28,7 +28,7 @@ import { Service as ConfigSvc } from "../config/config"
 import { Service as SnapshotSvc } from "../snapshot/snapshot"
 import { type Def as ToolDef } from "../tool/tool"
 import { toAITool } from "../llm/llm"
-import { buildEnvironment, buildCommitteeContext } from "../session/system"
+import { buildEnvironment, buildCommitteeContext, type AgentStyle } from "../session/system"
 import { detectConsensus, nextPhase, type CommitteePhase, type PlanArtifact, type ReviewArtifact, type CoderProgress } from "./protocol"
 import { buildCompactionPrompt } from "./compaction"
 import * as Tui from "../ui/tui"
@@ -88,10 +88,15 @@ export function runCommittee(opts?: {
     let maxInterns = 1
     let coderIsExecuting = false
     let yoloMode = false
-
-    const pmEnv = [...buildEnvironment(cwd, cwd), buildCommitteeContext("pm", maxInterns)]
-    const coderEnv = [...buildEnvironment(cwd, cwd), buildCommitteeContext("coder", maxInterns)]
-    const internEnv = [...buildEnvironment(cwd, cwd), buildCommitteeContext("intern", maxInterns)]
+    const agentStyles: Record<"pm" | "coder" | "intern", AgentStyle> = {
+      pm: "balanced",
+      coder: "balanced",
+      intern: "balanced",
+    }
+    const envFor = (role: "pm" | "coder" | "intern") => [
+      ...buildEnvironment(cwd, cwd),
+      buildCommitteeContext(role, maxInterns, agentStyles[role]),
+    ]
 
     const allToolDefs = yield* tools.all()
     const pmToolDefs = allToolDefs.filter((t) => ["read", "glob", "grep", "ls", "task", "submit_to_coder", "steer"].includes(t.id))
@@ -121,7 +126,7 @@ export function runCommittee(opts?: {
           sessionID: "intern-" + randomUUID().slice(0, 8),
           agent: { name: "intern", temperature: 0.1 },
           model: yield* getInternModel(),
-          system: internEnv,
+          system: envFor("intern"),
           messages: [{ role: "user", content: `Research task: ${description}\n\n${prompt}\n\nBe fast and concise. Report facts only.` } as any],
           tools: buildTools(internToolDefs, "intern"),
           maxOutputTokens: cfg.models.intern?.maxTokens ?? 4096,
@@ -476,7 +481,7 @@ export function runCommittee(opts?: {
 
       const compactStream = llm.stream({
         sessionID: "compaction", agent: { name: "pm", temperature: 0.3 },
-        model: yield* getPmModel(), system: pmEnv,
+        model: yield* getPmModel(), system: envFor("pm"),
         messages: [{ role: "system", content: buildCompactionPrompt("pm", { plan, review, currentPhase: phase, completedFiles: coderProgress.completedFiles, failedFiles: coderProgress.failedFiles, pmMessages: history, coderMessages: [] }) }] as any,
         tools: {}, maxOutputTokens: 2048,
         abortSignal: Tui.pmAbortSignal(),
@@ -563,6 +568,7 @@ export function runCommittee(opts?: {
         phase: "idle" as CommitteePhase, progress: coderProgress, compactionCount: 0, tokenUsage: 0, totalCost: 0,
         contextLimit: cfg.committee?.compaction?.contextLimit ?? 200000,
         currentPlan: undefined as PlanArtifact | undefined, theme: "dark-default", yolo: yoloMode,
+        styles: agentStyles,
       } as any, setState: () => {},
       dispatch: (a: string, payload?: unknown) => {
         if (a === "exit") { Tui.cleanup(); process.exit(0) }
@@ -580,6 +586,15 @@ export function runCommittee(opts?: {
         if (a === "model_changed") { showHeader() }
         if (a === "pmreview") { pmReviewEnabled = payload as boolean; w(`PM auto-review: ${pmReviewEnabled ? "ON" : "OFF"}`, "command") }
         if (a === "yolo") { yoloMode = payload as boolean; cmdCtx.state.yolo = yoloMode; w(`YOLO mode: ${yoloMode ? "ON" : "OFF"}`, "command") }
+        if (a === "style") {
+          const p = payload as { agent?: "pm" | "coder" | "intern"; style?: AgentStyle }
+          if (p.agent && p.style) {
+            agentStyles[p.agent] = p.style
+            cmdCtx.state.styles = { ...agentStyles }
+            w(`${p.agent.toUpperCase()} style: ${p.style}`, "command")
+            showHeader()
+          }
+        }
         if (a === "maxinterns") { maxInterns = Math.max(1, (payload as number) || 1); w(`Max Intern batch: ${maxInterns}`, "command") }
         if (a === "set_context_limit") { contextLimit = (payload as number) || contextLimit; cmdCtx.state.contextLimit = contextLimit }
         if (a === "show_reasoning") {
@@ -669,6 +684,11 @@ export function runCommittee(opts?: {
           { text: "PM: ", color: "#8B949E" }, { text: pmCfg.model, color: "#C9D1D9" },
           { text: GAP + "Coder: ", color: "#8B949E" }, { text: coderCfg.model, color: "#C9D1D9" },
           { text: GAP + "Intern: ", color: "#8B949E" }, { text: internModel, color: "#C9D1D9" },
+        ],
+        [
+          { text: "Style: ", color: "#8B949E" }, { text: `PM ${agentStyles.pm}`, color: "#C9D1D9" },
+          { text: GAP, color: "#8B949E" }, { text: `Coder ${agentStyles.coder}`, color: "#C9D1D9" },
+          { text: GAP, color: "#8B949E" }, { text: `Intern ${agentStyles.intern}`, color: "#C9D1D9" },
         ],
         [
           { text: "Base: ", color: "#8B949E" }, { text: base, color: "#C9D1D9" },
@@ -797,7 +817,7 @@ export function runCommittee(opts?: {
           const maxTok = runtimeConfig.get("pm", cfg.models.pm).maxTokens ?? 200000
           const pmStream = llm.stream({
             sessionID: "main", agent: { name: "pm", temperature: temp },
-            model: yield* getPmModel(), system: pmEnv,
+            model: yield* getPmModel(), system: envFor("pm"),
             messages: [...history, { role: "system" as const, content: SYSTEM_REMINDER }],
             tools: buildTools(pmToolDefs, "pm"), maxOutputTokens: maxTok,
             abortSignal: Tui.pmAbortSignal(),
@@ -863,7 +883,7 @@ export function runCommittee(opts?: {
 
           const coderReviewStream = llm.stream({
             sessionID: coderSessionID, agent: { name: "coder", temperature: cfg.models.coder.temperature ?? 0.5 },
-            model: yield* getCoderModel(), system: coderEnv, messages: coderMessages,
+            model: yield* getCoderModel(), system: envFor("coder"), messages: coderMessages,
             tools: buildTools(coderToolDefs, "coder"), maxOutputTokens: cfg.models.coder.maxTokens ?? 200000,
             abortSignal: Tui.coderAbortSignal(),
           })
@@ -907,7 +927,7 @@ export function runCommittee(opts?: {
 
             const pmStream = llm.stream({
               sessionID: "main", agent: { name: "pm" },
-              model: yield* getPmModel(), system: pmEnv,
+              model: yield* getPmModel(), system: envFor("pm"),
               messages: [{ role: "user", content: `Coder feedback:\n${JSON.stringify(review, null, 2)}\nRespond to each comment.` }],
               tools: buildTools(pmToolDefs, "pm"),
               abortSignal: Tui.pmAbortSignal(),
@@ -918,7 +938,7 @@ export function runCommittee(opts?: {
 
             const coderStream = llm.stream({
               sessionID: coderSessionID ?? "coder", agent: { name: "coder" },
-              model: yield* getCoderModel(), system: coderEnv,
+              model: yield* getCoderModel(), system: envFor("coder"),
               messages: [{ role: "user", content: `PM response:\n${pmResp}\nReply "CONSENSUS" or "DIVERGE: <remaining issues>".` }],
               tools: buildTools(coderToolDefs, "coder"),
               abortSignal: Tui.coderAbortSignal(),
@@ -1027,7 +1047,7 @@ export function runCommittee(opts?: {
             const coderExecStream = llm.stream({
               sessionID: coderSessionID ?? "coder",
               agent: { name: "coder", temperature: cfg.models.coder.temperature ?? 0.5 },
-              model: yield* getCoderModel(), system: coderEnv,
+              model: yield* getCoderModel(), system: envFor("coder"),
               messages: execMessages, tools: buildTools(coderToolDefs, "coder"),
               maxOutputTokens: cfg.models.coder.maxTokens ?? 200000,
               abortSignal: Tui.coderAbortSignal(),
@@ -1053,7 +1073,7 @@ export function runCommittee(opts?: {
               const summaryStream = llm.stream({
                 sessionID: coderSessionID ?? "coder",
                 agent: { name: "coder", temperature: 0.3 },
-                model: yield* getCoderModel(), system: coderEnv,
+                model: yield* getCoderModel(), system: envFor("coder"),
                 messages: [
                   ...execMessages.slice(-3),
                   {

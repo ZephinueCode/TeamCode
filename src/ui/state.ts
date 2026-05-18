@@ -87,6 +87,9 @@ export interface TuiState {
 
   // Theme reference
   theme?: string
+
+  // Agent personality styles
+  styles?: Record<"pm" | "coder" | "intern", "fast" | "balanced" | "cautious">
 }
 
 export function initial(): TuiState {

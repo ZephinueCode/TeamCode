@@ -9,6 +9,7 @@
  *   /compact            Force compaction
  *   /theme dark|light   Switch theme
  *   /yolo true|false    Toggle permission prompts
+ *   /style pm|coder|intern fast|balanced|cautious
  *   /exit               Quit
  */
 import { runtimeConfig } from "../config/runtime"
@@ -103,6 +104,24 @@ export const builtinCommands: SlashCommand[] = [
     },
   },
   {
+    name: "style",
+    description: "Set agent style. /style pm|coder|intern fast|balanced|cautious",
+    execute(args, ctx) {
+      const parts = args.trim().toLowerCase().split(/\s+/).filter(Boolean)
+      const agent = parts[0]
+      const style = parts[1]
+      const styles = (ctx.state as any).styles ?? { pm: "balanced", coder: "balanced", intern: "balanced" }
+      if (!agent) {
+        return `Styles: PM ${styles.pm} | Coder ${styles.coder} | Intern ${styles.intern}\nUsage: /style pm|coder|intern fast|balanced|cautious`
+      }
+      if (!["pm", "coder", "intern"].includes(agent) || !["fast", "balanced", "cautious"].includes(style ?? "")) {
+        return "Usage: /style pm|coder|intern fast|balanced|cautious"
+      }
+      ctx.dispatch("style", { agent, style })
+      return `${agent.toUpperCase()} style → ${style}`
+    },
+  },
+  {
     name: "help",
     aliases: ["h", "?"],
     description: "Show all available commands",
@@ -123,6 +142,7 @@ export const builtinCommands: SlashCommand[] = [
       return [
         `Phase: ${ctx.state.phase}`,
         `Models: PM ${ctx.state.pmModel} | Coder ${ctx.state.coderModel} | Intern ${ctx.state.internModel ?? "n/a"}`,
+        `Styles: PM ${((ctx.state as any).styles?.pm ?? "balanced")} | Coder ${((ctx.state as any).styles?.coder ?? "balanced")} | Intern ${((ctx.state as any).styles?.intern ?? "balanced")}`,
         `Permissions: ${(ctx.state as any).yolo ? "YOLO" : "approval required"}`,
         `Files: ${p.completedFiles.length} done | ${p.currentFile ?? "—"} in progress | ${p.failedFiles.length} failed`,
         `Compactions: ${ctx.state.compactionCount} | Tokens: ${Math.round(ctx.state.tokenUsage / 1000)}k`,

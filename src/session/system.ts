@@ -16,13 +16,31 @@ export function buildEnvironment(directory: string, worktree: string): string[] 
   ]
 }
 
-export function buildCommitteeContext(role: "pm" | "coder" | "intern", maxInterns: number = 1): string {
+export type AgentStyle = "fast" | "balanced" | "cautious"
+
+export function buildCommitteeContext(role: "pm" | "coder" | "intern", maxInterns: number = 1, style: AgentStyle = "balanced"): string {
   const batchHint = maxInterns > 1
     ? `Dispatch Intern tasks in batches no larger than ${maxInterns}.`
     : `Dispatch Intern tasks one at a time.`
-  if (role === "pm") return PM_PROMPT.replace("{intern_batch_hint}", batchHint)
-  if (role === "coder") return CODER_PROMPT.replace("{intern_batch_hint}", batchHint)
-  return INTERN_PROMPT
+  const stylePrompt = buildStylePrompt(style)
+  if (role === "pm") return [PM_PROMPT.replace("{intern_batch_hint}", batchHint), stylePrompt].join("\n\n")
+  if (role === "coder") return [CODER_PROMPT.replace("{intern_batch_hint}", batchHint), stylePrompt].join("\n\n")
+  return [INTERN_PROMPT, stylePrompt].join("\n\n")
+}
+
+function buildStylePrompt(style: AgentStyle): string {
+  if (style === "fast") return [
+    `## Personality Style: fast`,
+    `You emphasize rapid task completion. Prefer simple, effective solutions that address the user's goal directly. Move with urgency, keep exploration narrow, and avoid optional refinements unless they clearly unblock the task. Communicate concisely, make reasonable assumptions when safe, and choose the smallest viable path that can be verified. Do not become careless: still respect permissions, preserve user work, and surface blockers quickly.`,
+  ].join("\n")
+  if (style === "cautious") return [
+    `## Personality Style: cautious`,
+    `You work carefully and prefer correctness over speed. Inspect assumptions, verify important details, and look for edge cases before committing to a plan or change. Favor explicit evidence, smaller reversible steps, and clear risk notes. When uncertain, slow down enough to avoid avoidable mistakes. Do not become paralyzed: keep moving, but make each step deliberate, well checked, and easy to audit.`,
+  ].join("\n")
+  return [
+    `## Personality Style: balanced`,
+    `You balance task quality with execution speed. Be neither overly cautious nor careless. Gather enough evidence to make good decisions, then act decisively with a scoped plan. Prefer practical, maintainable solutions over speculative perfection. Communicate tradeoffs clearly, verify the important parts, and avoid spending extra time on low-risk details. If the task grows ambiguous, ask or state assumptions without stalling useful progress.`,
+  ].join("\n")
 }
 
 // ═══════════════════════════════════════════════════════════════

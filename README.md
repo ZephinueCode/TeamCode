@@ -6,8 +6,17 @@ PM plans, Coder reviews and writes, Intern researches. Async execution means you
 
 ## Updates
 
+- 2026-5-19 v0.3.0: Various bug fixes & security update & model character
 - 2026-5-18 v0.2.0: Various bug fixes & quality of life updates
 - 2026-5-17 v0.1.0: Initial version
+
+
+### Latest Version: v0.3.0
+
+- Fixed a lot of bugs
+- Added primitive security guardrails that ask for user permission
+- Added configurable model characteristics (Cautious, Balanced, Fast).
+- Enhanced overall quality of prompts
 
 ## Why TeamCode?
 
