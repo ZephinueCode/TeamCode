@@ -45,7 +45,14 @@ fi
 # ── 2. Install dependencies ──
 echo -e "  ${GRAY}Installing packages...${NC}"
 cd "$TEAMCODE_ROOT"
-bun install --frozen-lockfile 2>/dev/null || bun install
+if bun install --frozen-lockfile 2>/dev/null; then
+  : # lockfile matched, nothing to do
+else
+  # WSL / cross-filesystem: bun's atomic lockfile rename can fail on NTFS.
+  # Remove old lockfiles so bun creates fresh ones without rename().
+  rm -f bun.lockb bun.lock package-lock.json 2>/dev/null || true
+  bun install
+fi
 echo -e "  ${GREEN}✓${NC} dependencies"
 
 # ── 3. Create launcher ──
