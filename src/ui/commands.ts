@@ -155,11 +155,26 @@ export const builtinCommands: SlashCommand[] = [
   },
   {
     name: "copy",
-    description: "Copy conversation to clipboard. /copy | /copy 100",
+    description: "Copy messages to clipboard. /copy | /copy 20 | /copy 5 15",
     execute(args, ctx) {
-      const count = parseInt(args.trim()) || 50
-      ctx.dispatch("copy", count)
-      return `Copying last ${count} messages to clipboard...`
+      const parts = args.trim().split(/\s+/).filter(Boolean)
+      if (parts.length === 0) {
+        ctx.dispatch("copy", { start: 1, end: 50 })
+        return "Copying last 50 messages to clipboard..."
+      }
+      if (parts.length === 1) {
+        const end = parseInt(parts[0]!)
+        if (isNaN(end) || end < 1) return "Usage: /copy [END] or /copy [START] [END]"
+        ctx.dispatch("copy", { start: 1, end })
+        return `Copying last ${end} messages to clipboard...`
+      }
+      const start = parseInt(parts[0]!)
+      const end = parseInt(parts[1]!)
+      if (isNaN(start) || isNaN(end) || start < 1 || end < start) {
+        return "Usage: /copy [START] [END]  (1 = most recent, counts backward)"
+      }
+      ctx.dispatch("copy", { start, end })
+      return `Copying last ${start}–${end} messages to clipboard...`
     },
   },
   {

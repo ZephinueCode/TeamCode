@@ -278,6 +278,13 @@ export function runCommittee(opts?: {
             if (e?.type === "text-delta") {
               text += (e.text ?? "")
             }
+            // ── Capture tool-call arguments so they appear in history ──
+            if (e?.type === "tool-call") {
+              const toolInput = (e as any).input ?? {}
+              if ((e as any).toolName === "submit_to_coder" && toolInput.approach) {
+                text += "\n\n[Plan submitted to Coder]\n" + String(toolInput.approach)
+              }
+            }
             if (e?.type === "finish-step" && (e as any).usage) {
               const u = (e as any).usage
               // stepInput is cumulative (includes all prior steps' context + output),
@@ -404,7 +411,10 @@ export function runCommittee(opts?: {
           w("◆ /review → Coder will review the conversation above", "pm-header")
           phase = "coder_review"
         }
-        if (a === "copy") { Tui.copyMessages((payload as number) || 50).then((msg: string) => w(msg, "command")).catch(() => {}) }
+        if (a === "copy") {
+          const range = typeof payload === "number" ? { start: 1, end: payload } : (payload as { start: number; end: number }) ?? { start: 1, end: 50 }
+          Tui.copyMessages(range).then((msg: string) => w(msg, "command")).catch(() => {})
+        }
         if (a === "model_changed") { showHeader() }
         if (a === "pmreview") { pmReviewEnabled = payload as boolean; w(`PM auto-review: ${pmReviewEnabled ? "ON" : "OFF"}`, "command") }
         if (a === "maxinterns") { maxInterns = Math.max(1, (payload as number) || 1); w(`Max Intern batch: ${maxInterns}`, "command") }
@@ -611,7 +621,7 @@ export function runCommittee(opts?: {
           const coderMessages: ModelMessage[] = [
             ...history.slice(-6),
             { role: "system", content: "You are in review phase. Move fast — your goal is to catch blockers, not to perfect the plan. Spend 2-3 minutes max. Check 2-3 key files with grep/read, then decide." },
-            { role: "user", content: `Review this plan:\n\n${plan?.approach ?? plan?.summary ?? "(see conversation above)"}\n\nBe decisive. Do not read exhaustively — spot-check file paths and approach. If the general direction is sound, approve it. Only push back on real problems (wrong file, missing edge case, architectural risk). Minor issues can be fixed during execution.\n\nOutput format:\nOverall: agree / agree_with_changes / disagree\nComments (blockers only, skip if none):\n- topic: your assessment — severity: blocker | suggestion` },
+            { role: "user", content: `Review this plan:\n\n${plan?.approach || plan?.summary || "(see conversation above)"}\n\nBe decisive. Do not read exhaustively — spot-check file paths and approach. If the general direction is sound, approve it. Only push back on real problems (wrong file, missing edge case, architectural risk). Minor issues can be fixed during execution.\n\nOutput format:\nOverall: agree / agree_with_changes / disagree\nComments (blockers only, skip if none):\n- topic: your assessment — severity: blocker | suggestion` },
           ]
 
           const coderReviewStream = llm.stream({
@@ -756,7 +766,7 @@ export function runCommittee(opts?: {
 
           // Always inject the plan explicitly — history may not contain it
           // after compaction, and the Coder needs precise instructions.
-          const planText = plan?.approach ?? plan?.summary ?? "(implement the changes discussed)"
+          const planText = plan?.approach || plan?.summary || "(implement the changes discussed)"
           const execMessages: ModelMessage[] = [
             ...history.slice(-4),
             { role: "system", content: `Plan to implement:\n${planText}\n\nExecution phase. Use write for new files, edit for changes. Read each file before editing. Write every file mentioned in the plan.` },
@@ -768,7 +778,6 @@ export function runCommittee(opts?: {
           const coderJob = Effect.gen(function* () {
             coderLastAction = "starting..."
             coderFilesDone = 0
-            coderTokens = 0
             coderStartedAt = Date.now()
             w("◆ CODER executing (watch tools below)", "pm-header")
 
@@ -804,7 +813,7 @@ export function runCommittee(opts?: {
             coderLastAction = "done"
             coderStartedAt = 0
             coderIsExecuting = false
-            setTimeout(() => { coderLastAction = "idle" }, 8000)
+            setTimeout(() => { coderLastAction = "idle"; coderTokens = 0 }, 8000)
 
             w("─".repeat(60), "system")
             w("● Coder · " + new Date().toLocaleTimeString(), "coder")

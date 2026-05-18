@@ -246,8 +246,8 @@ export async function init() {
     }
   })
 
-  // ═══ Mouse-up → copy selection ═══
-  renderer.on("mouseUp" as any, () => {
+  // ═══ Selection finished → copy to clipboard ═══
+  renderer.on("selection", () => {
     try {
       const sel = (renderer as any).getSelection?.()
       const text = sel?.getSelectedText?.()
@@ -384,13 +384,23 @@ export function showSelect(
   return selectPrompt(renderer, title, options, message)
 }
 
-// Copy last N messages to system clipboard (used by /copy command)
-export async function copyMessages(count: number = 50): Promise<string> {
-  const recent = messageLog.slice(-count)
-  const text = recent.join("\n")
+// Copy messages to system clipboard (used by /copy command)
+// range: { start: 1, end: 50 } means "most-recent 1st through most-recent 50th"
+export async function copyMessages(range?: { start: number; end: number }): Promise<string> {
+  const total = messageLog.length
+  if (total === 0) return "Nothing to copy"
+
+  const start = range?.start ?? 1
+  const end = range?.end ?? 50
+
+  const fromIdx = Math.max(0, total - end)
+  const toIdx = Math.max(0, total - start + 1)
+  const selected = messageLog.slice(fromIdx, toIdx)
+
+  const text = selected.join("\n")
   if (text.trim()) {
     await copyToClipboard(text)
-    return `Copied ${recent.length} messages to clipboard`
+    return `Copied ${selected.length} messages to clipboard`
   }
   return "Nothing to copy"
 }
