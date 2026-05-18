@@ -29,7 +29,7 @@ import { Service as SnapshotSvc } from "../snapshot/snapshot"
 import { type Def as ToolDef } from "../tool/tool"
 import { toAITool } from "../llm/llm"
 import { buildEnvironment, buildCommitteeContext, type AgentStyle } from "../session/system"
-import { detectConsensus, nextPhase, type CommitteePhase, type PlanArtifact, type ReviewArtifact, type CoderProgress } from "./protocol"
+import { detectConsensus, nextPhase, type CommitteePhase, type PlanArtifact, type ReviewArtifact, type CoderProgress, type DeliberationArtifact } from "./protocol"
 import { buildCompactionPrompt } from "./compaction"
 import * as Tui from "../ui/tui"
 import { runtimeConfig } from "../config/runtime"
@@ -866,7 +866,7 @@ export function runCommittee(opts?: {
           coderStartedAt = Date.now()
           emit("phase-enter", "🔍", "Coder reviewing", "", "running", "coder")
 
-          w("◆ CODER — Reviewing Plan", "pm-header")
+          w("◆ CODER — Reviewing Plan", "coder")
           w("─".repeat(40), "system")
 
           // Compact before handing context to Coder — review may read many files
@@ -904,10 +904,11 @@ export function runCommittee(opts?: {
           w("")
           emit("phase-enter", "🔍", "Review done", review.overall, "done", "coder")
 
-          if (review.overall === "disagree") {
+          const consensus = detectConsensus(review)
+          if (consensus === "stalemate") {
             w("⚠ Coder disagrees — entering deliberation", "warning")
             phase = "deliberation" as CommitteePhase
-          } else if (review.overall === "agree_with_changes" && review.suggestedChanges.length > 0) {
+          } else if (consensus === "minor_diff" && review.suggestedChanges.length > 0) {
             w("⚡ Coder has suggestions — entering deliberation", "warning")
             phase = "deliberation" as CommitteePhase
           } else {
@@ -939,7 +940,17 @@ export function runCommittee(opts?: {
             const coderStream = llm.stream({
               sessionID: coderSessionID ?? "coder", agent: { name: "coder" },
               model: yield* getCoderModel(), system: envFor("coder"),
-              messages: [{ role: "user", content: `PM response:\n${pmResp}\nReply "CONSENSUS" or "DIVERGE: <remaining issues>".` }],
+              messages: [{
+                role: "user",
+                content: [
+                  `PM response:`,
+                  pmResp,
+                  ``,
+                  `Return ONLY compact JSON with this shape:`,
+                  `{"verdict":"consensus"|"diverge","remainingIssues":[{"topic":"...","severity":"blocker"|"suggestion","detail":"..."}]}`,
+                  `Use verdict "consensus" only if all blocker issues are resolved. Use "diverge" if any blocker remains.`,
+                ].join("\n"),
+              }],
               tools: buildTools(coderToolDefs, "coder"),
               abortSignal: Tui.coderAbortSignal(),
             })
@@ -954,7 +965,13 @@ export function runCommittee(opts?: {
 
             yield* maybeCompact
 
-            if (coderResp.startsWith("CONSENSUS")) { phase = "awaiting_approval"; break }
+            const deliberation = parseDeliberation(coderResp)
+            if (deliberation.verdict === "consensus") { phase = "awaiting_approval"; break }
+            review = {
+              overall: "disagree",
+              comments: deliberation.remainingIssues.map((i) => ({ topic: i.topic, opinion: i.detail, severity: i.severity })),
+              suggestedChanges: [],
+            }
             if (round >= maxRounds) { phase = "awaiting_decision"; break }
           }
           break
@@ -1017,7 +1034,7 @@ export function runCommittee(opts?: {
 
         // ═════ executing (async) ═════
         case "executing": {
-          w("◆ CODER — Executing (async)  You can keep chatting with PM", "pm-header")
+          w("◆ CODER — Executing (async)  You can keep chatting with PM", "coder")
           w("")
           emit("phase-enter", "🚀", "Coder executing", "async", "running", "coder")
 
@@ -1040,7 +1057,7 @@ export function runCommittee(opts?: {
             coderLastAction = "starting..."
             coderFilesDone = 0
             coderStartedAt = Date.now()
-            w("◆ CODER executing (watch tools below)", "pm-header")
+            w("◆ CODER executing (watch tools below)", "coder")
 
             coderActions.length = 0
             currentCoderExecution = { writeSuccess: 0, writeFailed: 0, text: "", aborted: false, failedActions: [] }
@@ -1232,4 +1249,53 @@ function parseReview(text: string): ReviewArtifact {
   }
 
   return { overall, comments, suggestedChanges: changes }
+}
+
+function parseDeliberation(text: string): DeliberationArtifact {
+  const parsed = extractJsonObject(text)
+  const verdict = parsed?.verdict
+  if (verdict === "consensus") {
+    return { verdict: "consensus", remainingIssues: [] }
+  }
+  if (verdict === "diverge") {
+    return {
+      verdict: "diverge",
+      remainingIssues: normalizeIssues(parsed?.remainingIssues, text),
+    }
+  }
+  return {
+    verdict: "diverge",
+    remainingIssues: [{
+      topic: "unparseable_deliberation",
+      severity: "blocker",
+      detail: text.slice(0, 500),
+    }],
+  }
+}
+
+function normalizeIssues(value: unknown, fallback: string): DeliberationArtifact["remainingIssues"] {
+  if (!Array.isArray(value)) {
+    return [{ topic: "remaining_issues", severity: "blocker", detail: fallback.slice(0, 500) }]
+  }
+  const issues = value.flatMap((item) => {
+    if (typeof item !== "object" || item === null) return []
+    const raw = item as Record<string, unknown>
+    const topic = typeof raw.topic === "string" && raw.topic.trim() ? raw.topic.trim() : "issue"
+    const severity: "blocker" | "suggestion" = raw.severity === "suggestion" ? "suggestion" : "blocker"
+    const detail = typeof raw.detail === "string" && raw.detail.trim() ? raw.detail.trim() : topic
+    return [{ topic, severity, detail }]
+  })
+  return issues.length ? issues : [{ topic: "remaining_issues", severity: "blocker", detail: fallback.slice(0, 500) }]
+}
+
+function extractJsonObject(text: string): any | undefined {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]
+  for (const candidate of [fenced, text, text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1)]) {
+    if (!candidate?.trim()) continue
+    try {
+      const parsed = JSON.parse(candidate.trim())
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed
+    } catch {}
+  }
+  return undefined
 }

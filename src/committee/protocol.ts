@@ -63,6 +63,15 @@ export interface DeliberationTurn {
   openIssues: string[]
 }
 
+export interface DeliberationArtifact {
+  verdict: "consensus" | "diverge"
+  remainingIssues: Array<{
+    topic: string
+    severity: "blocker" | "suggestion"
+    detail: string
+  }>
+}
+
 // Coder execution progress — visible in TUI
 export interface CoderProgress {
   currentFile: string | null
