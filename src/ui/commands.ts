@@ -189,6 +189,14 @@ export const builtinCommands: SlashCommand[] = [
     },
   },
   {
+    name: "stall",
+    description: "Force-stop the Coder background thread. /stall",
+    execute(_args, ctx) {
+      ctx.dispatch("stall_coder")
+      return "Coder aborted."
+    },
+  },
+  {
     name: "exit",
     aliases: ["quit", "q"],
     description: "Exit TeamCode",

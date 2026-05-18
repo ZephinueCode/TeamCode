@@ -431,6 +431,13 @@ export function runCommittee(opts?: {
         if (a === "pmreview") { pmReviewEnabled = payload as boolean; w(`PM auto-review: ${pmReviewEnabled ? "ON" : "OFF"}`, "command") }
         if (a === "maxinterns") { maxInterns = Math.max(1, (payload as number) || 1); w(`Max Intern batch: ${maxInterns}`, "command") }
         if (a === "set_context_limit") { contextLimit = (payload as number) || contextLimit }
+        if (a === "stall_coder") {
+          Tui.coderAbortSignal()      // abort running Coder stream + create fresh signal
+          coderIsExecuting = false
+          coderLastAction = "idle"
+          coderStartedAt = 0
+          w("⚡ Coder aborted by user.", "warning")
+        }
         if (a === "force_planning") phase = "idle"
       },
     } as any
