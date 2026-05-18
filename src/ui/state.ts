@@ -78,6 +78,9 @@ export interface TuiState {
   tokenUsage: number
   totalCost: number
 
+  // Context window limit
+  contextLimit: number
+
   // Input area
   inputDraft: string
   inputPlaceholder: string
@@ -101,6 +104,7 @@ export function initial(): TuiState {
     compactionCount: 0,
     tokenUsage: 0,
     totalCost: 0,
+    contextLimit: 200000,
     inputDraft: "",
     inputPlaceholder: "Type a message or /command...",
   }

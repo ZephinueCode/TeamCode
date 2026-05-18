@@ -264,6 +264,32 @@ export async function init() {
 export function cleanup() { try { renderer?.destroy() } catch {} }
 
 // ═══════════════════════════════════════════════════════════════
+// Header — multi-colored row layout
+// ═══════════════════════════════════════════════════════════════
+
+export function renderHeader(rows: { text: string; color?: string; bold?: boolean }[][]): void {
+  if (!renderer || !scrollBox) return
+  for (const row of rows) {
+    const rowBox = new BoxRenderable(renderer, {
+      flexDirection: "row", flexShrink: 0, gap: 0,
+    })
+    for (const seg of row) {
+      const attrs = seg.bold ? TextAttributes.BOLD : TextAttributes.NONE
+      rowBox.add(new TextRenderable(renderer, {
+        content: seg.text,
+        fg: seg.color ?? ROLE_FG.system,
+        attributes: attrs,
+        selectable: false,
+        flexShrink: 0,
+      }))
+    }
+    scrollBox.add(rowBox)
+    childCount++
+  }
+  refocusInput()
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Write message to scroll box
 // ═══════════════════════════════════════════════════════════════
 

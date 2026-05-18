@@ -290,7 +290,10 @@ export function runCommittee(opts?: {
               // stepInput is cumulative (includes all prior steps' context + output),
               // stepOutput is only this step's new output. Sum = total context consumed.
               const stepTotal = (u.inputTokens ?? 0) + (u.outputTokenDetails?.textTokens ?? u.outputTokens ?? 0)
-              if (stepTotal > totalTokensUsed) totalTokensUsed = stepTotal
+              if (stepTotal > totalTokensUsed) {
+                totalTokensUsed = stepTotal
+                cmdCtx.state.tokenUsage = totalTokensUsed
+              }
               if (agent === "pm" && stepTotal > pmTokens) pmTokens = stepTotal
               if (isOverflow()) needsCompaction = true
             }
@@ -322,7 +325,10 @@ export function runCommittee(opts?: {
             if (e?.type === "finish-step" && (e as any).usage) {
               const u = (e as any).usage
               const stepTotal = (u.inputTokens ?? 0) + (u.outputTokenDetails?.textTokens ?? u.outputTokens ?? 0)
-              if (stepTotal > totalTokensUsed) totalTokensUsed = stepTotal
+              if (stepTotal > totalTokensUsed) {
+                totalTokensUsed = stepTotal
+                cmdCtx.state.tokenUsage = totalTokensUsed
+              }
               if (stepTotal > coderTokens) coderTokens = stepTotal
             }
           })),
@@ -400,6 +406,7 @@ export function runCommittee(opts?: {
       state: {
         pmModel: cfg.models.pm.model, coderModel: cfg.models.coder.model, internModel: cfg.models.intern?.model,
         phase: "idle" as CommitteePhase, progress: coderProgress, compactionCount: 0, tokenUsage: 0, totalCost: 0,
+        contextLimit: cfg.committee?.compaction?.contextLimit ?? 200000,
         currentPlan: undefined as PlanArtifact | undefined, theme: "dark-default",
       } as any, setState: () => {},
       dispatch: (a: string, payload?: unknown) => {
@@ -418,7 +425,7 @@ export function runCommittee(opts?: {
         if (a === "model_changed") { showHeader() }
         if (a === "pmreview") { pmReviewEnabled = payload as boolean; w(`PM auto-review: ${pmReviewEnabled ? "ON" : "OFF"}`, "command") }
         if (a === "maxinterns") { maxInterns = Math.max(1, (payload as number) || 1); w(`Max Intern batch: ${maxInterns}`, "command") }
-        if (a === "set_context_limit") { contextLimit = (payload as number) || contextLimit }
+        if (a === "set_context_limit") { contextLimit = (payload as number) || contextLimit; cmdCtx.state.contextLimit = contextLimit }
         if (a === "show_reasoning") {
           if (reasoningBuffer) {
             w("─".repeat(40), "system")
@@ -446,9 +453,39 @@ export function runCommittee(opts?: {
       const coderCfg = runtimeConfig.get("coder", cfg.models.coder)
       const internCfg = cfg.models.intern
       const internModel = internCfg?.endpoint && internCfg.model ? internCfg.model : pmCfg.model
-      w(`PM: ${pmCfg.model}  │  Intern: ${internModel}  │  Coder: ${coderCfg.model}`, "system")
-      w("/help /apikey /baseurl /review /compact /copy /pmreview /maxinterns /exit", "command")
-      w("")
+
+      const maskKey = (k?: string) => {
+        if (!k || k.length < 8) return "not set"
+        return k.slice(0, 4) + "···" + k.slice(-4)
+      }
+
+      const base = pmCfg.endpoint ? pmCfg.endpoint.replace(/^https?:\/\//, "").replace(/\/v\d+$/, "") : "not set"
+      const key = maskKey(pmCfg.apiKey)
+
+      const W = Math.max(60, (process.stdout.columns || 80) - 4)
+      const GAP = "    "
+
+      Tui.renderHeader([
+        [{ text: "─".repeat(W), color: "#30363D" }],
+        [
+          { text: "●", color: "#58A6FF" }, { text: " PM" + GAP, color: "#58A6FF", bold: true },
+          { text: "●", color: "#3FB950" }, { text: " Coder" + GAP, color: "#3FB950", bold: true },
+          { text: "●", color: "#E3B341" }, { text: " Intern", color: "#E3B341", bold: true },
+        ],
+        [
+          { text: "PM: ", color: "#8B949E" }, { text: pmCfg.model, color: "#C9D1D9" },
+          { text: GAP + "Coder: ", color: "#8B949E" }, { text: coderCfg.model, color: "#C9D1D9" },
+          { text: GAP + "Intern: ", color: "#8B949E" }, { text: internModel, color: "#C9D1D9" },
+        ],
+        [
+          { text: "Base: ", color: "#8B949E" }, { text: base, color: "#C9D1D9" },
+          { text: GAP + "Key: ", color: "#8B949E" }, { text: key, color: "#C9D1D9" },
+        ],
+        [],
+        [{ text: "/help", color: "#BC8CFF" }, { text: " for all commands", color: "#8B949E" }],
+        [{ text: "─".repeat(W), color: "#30363D" }],
+        [],
+      ])
     }
     showHeader()
 

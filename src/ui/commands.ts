@@ -74,7 +74,9 @@ export const builtinCommands: SlashCommand[] = [
         ctx.dispatch("set_context_limit", val)
         return `Context limit → ${val.toLocaleString()} tokens ✓`
       }
-      return `Context limit: ${ctx.state.tokenUsage ? Math.round(ctx.state.tokenUsage / 1000) + 'k / ' + (ctx.state as any)._contextLimit / 1000 + 'k' : 'unknown'}`
+      const used = Math.round(ctx.state.tokenUsage / 1000)
+      const limit = Math.round(ctx.state.contextLimit / 1000)
+      return `Context: ${used}k / ${limit}k tokens`
     },
   },
   {
