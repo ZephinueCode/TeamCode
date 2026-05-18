@@ -30,7 +30,7 @@ if ($bun) {
 # ── 2. Install dependencies ──
 Write-Host "  Installing packages..." -ForegroundColor Gray
 Set-Location $TEAMCODE_ROOT
-bun install 2>$null
+$null = bun install
 Write-Host "  ✓ dependencies" -ForegroundColor Green
 
 # ── 3. Create install directory + launcher ──
