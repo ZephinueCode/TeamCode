@@ -253,10 +253,10 @@ export const builtinCommands: SlashCommand[] = [
   },
   {
     name: "stall",
-    description: "Force-stop the Coder background thread. /stall",
+    description: "Force-stop the active PM/Coder stream. /stall",
     execute(_args, ctx) {
       ctx.dispatch("stall_coder")
-      return "Coder aborted."
+      return "Active model aborted."
     },
   },
   {

@@ -88,6 +88,7 @@ export function runCommittee(opts?: {
     let maxInterns = 1
     let coderIsExecuting = false
     let yoloMode = false
+    let stallRequested = false
     const agentStyles: Record<"pm" | "coder" | "intern", AgentStyle> = {
       pm: "balanced",
       coder: "balanced",
@@ -573,6 +574,7 @@ export function runCommittee(opts?: {
       dispatch: (a: string, payload?: unknown) => {
         if (a === "exit") { Tui.cleanup(); process.exit(0) }
         if (a === "submit_to_coder") {
+          stallRequested = false
           const pmMsgs = history.filter((m) => m.role === "assistant")
           const context = pmMsgs.slice(-3).map((m) => m.content).join("\n")
           plan = { summary: "User submitted via /review", approach: context || "Review the conversation above and produce a coding plan.", files: [], risks: [], alternatives: [] }
@@ -608,15 +610,60 @@ export function runCommittee(opts?: {
           }
         }
         if (a === "stall_coder") {
-          Tui.coderAbortSignal()      // abort running Coder stream + create fresh signal
+          stallRequested = true
+          phase = "idle"
+          Tui.abortPm()
+          Tui.abortCoder()
           coderIsExecuting = false
           coderLastAction = "idle"
           coderStartedAt = 0
-          w("⚡ Coder aborted by user.", "warning")
+          pmThinking = false
+          w("⚡ Active model aborted by user.", "warning")
         }
         if (a === "force_planning") phase = "idle"
       },
     } as any
+
+    function handleSlashCommand(raw: string): boolean {
+      if (!raw.startsWith("/")) return false
+      const cmdName = raw.split(/\s+/)[0]!.slice(1)
+      const matches = matchCommands(raw, phase)
+      const exact = matches.find((c) => c.name === cmdName)
+
+      if (exact && (raw === "/" + exact.name || raw.startsWith("/" + exact.name + " "))) {
+        const args = raw.slice(exact.name.length + 1).trim()
+        w("")
+        const result = exact.execute(args, cmdCtx) as string
+        if (result) w(result, "command")
+        return true
+      }
+
+      if (raw === "/") {
+        w("Commands", "command")
+        for (const c of matchCommands("/", phase)) w(`/${c.name}  ${c.description}`, "command")
+        w("")
+        return true
+      }
+
+      if (matches.length > 0) {
+        w("Matching", "command")
+        for (const m of matches) w(`/${m.name}  ${m.description}`, "command")
+        w("")
+        return true
+      }
+
+      w("Unknown command. /help for all commands.", "system")
+      w("")
+      return true
+    }
+
+    Tui.setBackgroundSubmitHandler((raw) => {
+      if (raw.startsWith("/")) {
+        handleSlashCommand(raw)
+      } else {
+        w("Busy. Use /stall to interrupt, or wait for the active model to finish.", "system")
+      }
+    })
 
     async function missingPlannedFiles(): Promise<string[]> {
       const files = (plan?.files ?? [])
@@ -770,37 +817,11 @@ export function runCommittee(opts?: {
 
           // ── Slash commands ──
           if (raw.startsWith("/")) {
-            const cmdName = raw.split(/\s+/)[0]!.slice(1)
-            const matches = matchCommands(raw, phase)
-            const exact = matches.find((c) => c.name === cmdName)
-
-            if (exact && (raw === "/" + exact.name || raw.startsWith("/" + exact.name + " "))) {
-              const args = raw.slice(exact.name.length + 1).trim()
-              w("")
-              const result = exact.execute(args, cmdCtx) as string
-              if (result) w(result, "command")
-              if (exact.name === "exit") return
-              continue
-            }
-
-            if (raw === "/") {
-              w("Commands", "command")
-              for (const c of matchCommands("/", phase)) w(`/${c.name}  ${c.description}`, "command")
-              w("")
-              continue
-            }
-
-            if (matches.length > 0) {
-              w("Matching", "command")
-              for (const m of matches) w(`/${m.name}  ${m.description}`, "command")
-              w("")
-              continue
-            }
-
-            w("Unknown command. /help for all commands.", "system")
-            w("")
+            handleSlashCommand(raw)
             continue
           }
+
+          stallRequested = false
 
           // ── PM chat ──
           history.push({ role: "user", content: raw })
@@ -825,9 +846,10 @@ export function runCommittee(opts?: {
           const text = yield* collectText(pmStream, "pm")
           Tui.clearPmAbort()
 
-          if (text === "[ABORTED]") {
+          if (text === "[ABORTED]" || stallRequested) {
             w("⏎ Interrupted by user", "warning")
             w("")
+            phase = "idle"
             continue
           }
 
@@ -890,7 +912,7 @@ export function runCommittee(opts?: {
           const text = yield* collectText(coderReviewStream, "coder")
           Tui.clearCoderAbort()
 
-          if (text === "[ABORTED]") {
+          if (text === "[ABORTED]" || stallRequested) {
             w("⏎ Review interrupted", "warning")
             w("")
             phase = "idle"
@@ -898,6 +920,7 @@ export function runCommittee(opts?: {
           }
 
           yield* maybeCompact
+          if (stallRequested) { phase = "idle"; break }
 
           review = parseReview(text)
           w(text, "pm")
@@ -934,8 +957,9 @@ export function runCommittee(opts?: {
               abortSignal: Tui.pmAbortSignal(),
             })
             const pmResp = yield* collectText(pmStream, "pm")
-            if (pmResp === "[ABORTED]") { phase = "idle"; break }
+            if (pmResp === "[ABORTED]" || stallRequested) { phase = "idle"; break }
             yield* maybeCompact
+            if (stallRequested) { phase = "idle"; break }
 
             const coderStream = llm.stream({
               sessionID: coderSessionID ?? "coder", agent: { name: "coder" },
@@ -956,7 +980,7 @@ export function runCommittee(opts?: {
             })
             const coderResp = yield* collectText(coderStream, "coder")
             Tui.clearCoderAbort()
-            if (coderResp === "[ABORTED]") { phase = "idle"; break }
+            if (coderResp === "[ABORTED]" || stallRequested) { phase = "idle"; break }
 
             history.push({ role: "assistant", content: pmResp })
             history.push({ role: "user", content: coderResp })

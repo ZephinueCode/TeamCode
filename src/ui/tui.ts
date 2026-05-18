@@ -44,6 +44,7 @@ let internStatusText: TextRenderable
 let coderText: TextRenderable
 let inputComp: TextareaRenderable
 let pendingResolve: ((s: string) => void) | null = null
+let backgroundSubmitHandler: ((s: string) => void | Promise<void>) | null = null
 let childCount = 0
 let pmAbortCtrl: AbortController | null = null
 let coderAbortCtrl: AbortController | null = null
@@ -205,6 +206,9 @@ export async function init() {
         const r = pendingResolve; pendingResolve = null
         try { inputComp.clear() } catch {}
         r(text)
+      } else if (text && backgroundSubmitHandler) {
+        try { inputComp.clear() } catch {}
+        Promise.resolve(backgroundSubmitHandler(text)).catch(() => {})
       }
     },
   } as any)
@@ -270,6 +274,7 @@ export async function init() {
 }
 
 export function cleanup() {
+  backgroundSubmitHandler = null
   setTerminalTitle(process.platform === "win32" ? "PowerShell" : "Shell")
   try { renderer?.destroy() } catch {}
 }
@@ -394,6 +399,10 @@ export function readInput(): Promise<string> {
   })
 }
 
+export function setBackgroundSubmitHandler(handler: ((s: string) => void | Promise<void>) | null) {
+  backgroundSubmitHandler = handler
+}
+
 // Create a new abort signal for PM (replaces any previous PM signal)
 export function pmAbortSignal(): AbortSignal {
   pmAbortCtrl?.abort()
@@ -403,6 +412,11 @@ export function pmAbortSignal(): AbortSignal {
 
 export function clearPmAbort() { pmAbortCtrl = null }
 
+export function abortPm() {
+  try { pmAbortCtrl?.abort() } catch {}
+  pmAbortCtrl = null
+}
+
 // Create a new abort signal for Coder (independent from PM)
 export function coderAbortSignal(): AbortSignal {
   coderAbortCtrl?.abort()
@@ -411,6 +425,11 @@ export function coderAbortSignal(): AbortSignal {
 }
 
 export function clearCoderAbort() { coderAbortCtrl = null }
+
+export function abortCoder() {
+  try { coderAbortCtrl?.abort() } catch {}
+  coderAbortCtrl = null
+}
 
 // Interactive selection prompt (wraps selectPrompt with our renderer)
 export function showSelect(
