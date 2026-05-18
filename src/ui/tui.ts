@@ -48,6 +48,13 @@ let childCount = 0
 let pmAbortCtrl: AbortController | null = null
 let coderAbortCtrl: AbortController | null = null
 
+function setTerminalTitle(title: string) {
+  try {
+    process.title = title
+    process.stdout.write(`\x1b]0;${title}\x07`)
+  } catch {}
+}
+
 // Plain-text message ring buffer for /copy command
 const messageLog: string[] = []
 const MAX_LOG = 200
@@ -86,6 +93,7 @@ const mdStyle = SyntaxStyle.fromStyles({
 // ═══════════════════════════════════════════════════════════════
 
 export async function init() {
+  setTerminalTitle("TeamCode")
   renderer = await createCliRenderer({
     screenMode: "alternate-screen",
     exitOnCtrlC: false,
@@ -261,7 +269,10 @@ export async function init() {
   setTimeout(() => { try { inputComp.focus() } catch {} }, 150)
 }
 
-export function cleanup() { try { renderer?.destroy() } catch {} }
+export function cleanup() {
+  setTerminalTitle(process.platform === "win32" ? "PowerShell" : "Shell")
+  try { renderer?.destroy() } catch {}
+}
 
 // ═══════════════════════════════════════════════════════════════
 // Header — multi-colored row layout
