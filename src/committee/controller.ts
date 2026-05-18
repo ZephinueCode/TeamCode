@@ -298,9 +298,11 @@ export function runCommittee(opts?: {
             if (e?.type === "finish-step" && (e as any).usage) {
               flushReasoningLine()
               const u = (e as any).usage
-              const textOut = u.outputTokenDetails?.textTokens ?? u.outputTokens ?? 0
-              totalTokensUsed += (u.inputTokens ?? 0) + textOut
-              if (agent === "pm") pmTokens += (u.inputTokens ?? 0) + textOut
+              // stepInput is cumulative (includes all prior steps' context + output),
+              // stepOutput is only this step's new output. Sum = total context consumed.
+              const stepTotal = (u.inputTokens ?? 0) + (u.outputTokenDetails?.textTokens ?? u.outputTokens ?? 0)
+              if (stepTotal > totalTokensUsed) totalTokensUsed = stepTotal
+              if (agent === "pm" && stepTotal > pmTokens) pmTokens = stepTotal
               if (isOverflow()) needsCompaction = true
             }
           })),
@@ -331,8 +333,8 @@ export function runCommittee(opts?: {
           Stream.tap((e: any) => Effect.sync(() => {
             if (!overflowed && e?.type === "finish-step" && (e as any).usage) {
               const u = (e as any).usage
-              const textOut = u.outputTokenDetails?.textTokens ?? u.outputTokens ?? 0
-              totalTokensUsed += (u.inputTokens ?? 0) + textOut
+              const stepTotal = (u.inputTokens ?? 0) + (u.outputTokenDetails?.textTokens ?? u.outputTokens ?? 0)
+              if (stepTotal > totalTokensUsed) totalTokensUsed = stepTotal
               if (isOverflow()) {
                 overflowed = true
               }
