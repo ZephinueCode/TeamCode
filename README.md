@@ -6,7 +6,8 @@ PM plans, Coder reviews and writes, Intern researches. Async execution means you
 
 ## Updates
 
-- 2026-5-17 v0.1.0: Initial Version
+- 2026-5-17 v0.2.0: Various bug fixes & quality of lift updates
+- 2026-5-17 v0.1.0: Initial version
 
 ## Why TeamCode?
 
