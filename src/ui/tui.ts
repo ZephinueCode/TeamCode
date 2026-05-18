@@ -13,7 +13,7 @@
  */
 import {
   createCliRenderer, BoxRenderable, TextRenderable, ScrollBoxRenderable,
-  InputRenderable, MarkdownRenderable, SyntaxStyle, TextAttributes, RGBA,
+  TextareaRenderable, MarkdownRenderable, SyntaxStyle, TextAttributes, RGBA,
 } from "@opentui/core"
 import { copy as copyToClipboard } from "../util/clipboard"
 import { selectPrompt, type SelectOption, type SelectPromptResult } from "./select"
@@ -42,7 +42,7 @@ let scrollBox: ScrollBoxRenderable
 let pmStatusText: TextRenderable
 let internStatusText: TextRenderable
 let coderText: TextRenderable
-let inputComp: InputRenderable
+let inputComp: TextareaRenderable
 let pendingResolve: ((s: string) => void) | null = null
 let childCount = 0
 let pmAbortCtrl: AbortController | null = null
@@ -170,7 +170,9 @@ export async function init() {
   const dividerTop = makeText("─".repeat(process.stdout.columns || 80), "system")
   const dividerBot = makeText("─".repeat(process.stdout.columns || 80), "system")
 
-  // ═══ Input row: ❯ prompt + text input ──────────────────── ═══
+  // ═══ Input: TextareaRenderable (OpenCode pattern) ─────────── ═══
+  // InputRenderable hardcodes height:1 + wrapMode:none + strips \n.
+  // Use TextareaRenderable directly for native multi-line soft-wrap.
   const promptPrefix = new TextRenderable(renderer, {
     content: "❯ ",
     fg: ROLE_FG["pm-header"],
@@ -178,18 +180,27 @@ export async function init() {
     flexShrink: 0,
   })
 
-  inputComp = new InputRenderable(renderer, {
+  inputComp = new TextareaRenderable(renderer, {
     id: "user-input", flexGrow: 1,
     placeholder: "Type a message or /command...",
-  })
-  inputComp.on("enter" as any, (value: string) => {
-    const text = (typeof value === "string" ? value : (value as any)?.text ?? "").trim()
-    if (text && pendingResolve) {
-      const r = pendingResolve; pendingResolve = null
-      try { (inputComp as any).value = "" } catch {}
-      r(text)
-    }
-  })
+    textColor: ROLE_FG.user,
+    focusedTextColor: ROLE_FG.user,
+    minHeight: 1,
+    maxHeight: 6,
+    // Enter → submit, Ctrl+J → newline (terminal can't distinguish Ctrl+Enter from Enter)
+    keyBindings: [
+      { name: "return", action: "submit" },
+    ],
+    onSubmit: () => {
+      const text = ((inputComp as any).plainText ?? "").trim()
+      if (text && pendingResolve) {
+        const r = pendingResolve; pendingResolve = null
+        try { inputComp.clear() } catch {}
+        r(text)
+      }
+    },
+  } as any)
+
 
   const inputRow = new BoxRenderable(renderer, {
     flexDirection: "row", flexShrink: 0,
