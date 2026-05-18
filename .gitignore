@@ -5,3 +5,6 @@ dist/
 .vscode/
 .claude/
 .teamcode/
+package-lock.json
+bun.lock
+bun.lockb
