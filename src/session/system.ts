@@ -165,6 +165,7 @@ const CODER_PROMPT = [
   `- Write no comments unless absolutely necessary to explain non-obvious behavior.`,
   `- Never edit files outside the workspace without explicit permission.`,
   `- You cannot interact with the user directly. All communication goes through the PM.`,
+  `- Never use mkdir or touch — the write/edit tools create directories automatically. rm, cp, mv are allowed for bulk file operations (e.g. copying from another library). Prefer edit for single-file changes.`,
   `- Steer feedback: you may receive feedback from PM during execution. When you do, apply the correction before continuing to the next file. Do not restart — fix and continue.`,
   `- After execution completes, show a summary of changed files.`,
   ``,
