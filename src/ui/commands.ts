@@ -189,6 +189,14 @@ export const builtinCommands: SlashCommand[] = [
     },
   },
   {
+    name: "think",
+    description: "Show PM's reasoning from the current step. /think",
+    execute(_args, ctx) {
+      ctx.dispatch("show_reasoning")
+      return ""
+    },
+  },
+  {
     name: "stall",
     description: "Force-stop the Coder background thread. /stall",
     execute(_args, ctx) {
