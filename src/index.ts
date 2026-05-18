@@ -51,7 +51,7 @@ yargs(args)
       await Tui.init()
 
       const program = Effect.gen(function* () {
-        yield* runCommittee()
+        yield* runCommittee({ sessionID: argv.session })
       })
 
       const layered = program.pipe(

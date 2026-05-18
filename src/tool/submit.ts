@@ -18,18 +18,39 @@ export const SubmitTool = define("submit_to_coder", {
     required: ["summary", "approach"],
   },
   execute(args: unknown, _ctx: ToolContext): Effect.Effect<ExecuteResult> {
-    const a = args as { summary: string; approach: string }
+    const a = args as { summary?: unknown; approach?: unknown }
+    const summary = typeof a.summary === "string" ? a.summary.trim() : ""
+    const approach = typeof a.approach === "string" ? a.approach.trim() : ""
+
+    if (!summary || !approach) {
+      return Effect.succeed({
+        title: "Submit to Coder failed",
+        output: [
+          "Plan was not submitted to Coder.",
+          "submit_to_coder requires non-empty summary and approach strings.",
+        ].join("\n"),
+        metadata: {
+          submitted: false,
+          error: "missing_required_fields",
+          missing: [
+            summary ? "" : "summary",
+            approach ? "" : "approach",
+          ].filter(Boolean),
+        },
+      })
+    }
+
     return Effect.succeed({
-      title: `Submit to Coder: ${a.summary.slice(0, 80)}`,
+      title: `Submit to Coder: ${summary.slice(0, 80)}`,
       output: [
         `Plan submitted to Coder for review.`,
         ``,
-        `Summary: ${a.summary}`,
-        `Approach: ${a.approach}`,
+        `Summary: ${summary}`,
+        `Approach: ${approach}`,
       ].join("\n"),
       metadata: {
-        summary: a.summary,
-        approach: a.approach,
+        summary,
+        approach,
         submitted: true,
       },
     })

@@ -8,6 +8,7 @@
  *   /plan               Show current plan
  *   /compact            Force compaction
  *   /theme dark|light   Switch theme
+ *   /yolo true|false    Toggle permission prompts
  *   /exit               Quit
  */
 import { runtimeConfig } from "../config/runtime"
@@ -122,6 +123,7 @@ export const builtinCommands: SlashCommand[] = [
       return [
         `Phase: ${ctx.state.phase}`,
         `Models: PM ${ctx.state.pmModel} | Coder ${ctx.state.coderModel} | Intern ${ctx.state.internModel ?? "n/a"}`,
+        `Permissions: ${(ctx.state as any).yolo ? "YOLO" : "approval required"}`,
         `Files: ${p.completedFiles.length} done | ${p.currentFile ?? "—"} in progress | ${p.failedFiles.length} failed`,
         `Compactions: ${ctx.state.compactionCount} | Tokens: ${Math.round(ctx.state.tokenUsage / 1000)}k`,
       ].join("\n")
@@ -193,6 +195,22 @@ export const builtinCommands: SlashCommand[] = [
         return "PM auto-review: OFF"
       }
       return "Usage: /pmreview true | false"
+    },
+  },
+  {
+    name: "yolo",
+    description: "Toggle permission prompts. /yolo true | false",
+    execute(args, ctx) {
+      const val = args.trim().toLowerCase()
+      if (val === "true" || val === "on" || val === "1") {
+        ctx.dispatch("yolo", true)
+        return "YOLO mode: ON — tool calls are allowed without prompts"
+      }
+      if (val === "false" || val === "off" || val === "0") {
+        ctx.dispatch("yolo", false)
+        return "YOLO mode: OFF — tool calls require approval"
+      }
+      return "Usage: /yolo true | false"
     },
   },
   {

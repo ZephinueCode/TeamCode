@@ -16,6 +16,8 @@
  */
 import { Cause, Effect, Stream } from "effect"
 import { randomUUID } from "crypto"
+import * as fs from "fs/promises"
+import path from "path"
 import { spawn } from "cross-spawn"
 import type { ModelMessage } from "ai"
 import { Service as ProviderSvc, type ModelHandle } from "../provider/provider"
@@ -32,6 +34,7 @@ import { buildCompactionPrompt } from "./compaction"
 import * as Tui from "../ui/tui"
 import { runtimeConfig } from "../config/runtime"
 import { matchCommands } from "../ui/commands"
+import { evaluate, fromConfig, type Ruleset } from "../permission/permission"
 
 // ── Output helpers ──
 function w(text: string, role?: string) { Tui.write(text, role) }
@@ -41,9 +44,19 @@ function userEcho(text: string): string {
   return "You: " + preview
 }
 
+interface CoderExecutionStats {
+  writeSuccess: number
+  writeFailed: number
+  text: string
+  aborted: boolean
+  error?: string
+  failedActions: string[]
+}
+
 // ── Committee runner ──
 
 export function runCommittee(opts?: {
+  sessionID?: string
   onActivity?: (e: { type: string; icon: string; label: string; detail?: string; status: string; agent: string }) => void
 }) {
   return Effect.gen(function* () {
@@ -61,7 +74,10 @@ export function runCommittee(opts?: {
       onActivity?.({ type, icon, label, detail, status, agent })
 
     yield* snapshot.init()
-    yield* session.create({ title: "Committee session", agent: "pm", directory: cwd, modelProvider: "pm", modelID: cfg.models.pm.model })
+    const resumedSession = opts?.sessionID ? yield* session.get(opts.sessionID) : undefined
+    const mainSession = resumedSession ?? (yield* session.create({ title: "Committee session", agent: "pm", directory: cwd, modelProvider: "pm", modelID: cfg.models.pm.model }))
+    if (resumedSession) w(`◆ Resumed session ${resumedSession.id}`, "pm-header")
+    else w(`◆ Session ${mainSession.id}`, "system")
 
     const getPmModel = () => provider.pm
     const getCoderModel = () => provider.coder
@@ -71,6 +87,7 @@ export function runCommittee(opts?: {
     let pmReviewEnabled = true
     let maxInterns = 1
     let coderIsExecuting = false
+    let yoloMode = false
 
     const pmEnv = [...buildEnvironment(cwd, cwd), buildCommitteeContext("pm", maxInterns)]
     const coderEnv = [...buildEnvironment(cwd, cwd), buildCommitteeContext("coder", maxInterns)]
@@ -80,12 +97,20 @@ export function runCommittee(opts?: {
     const pmToolDefs = allToolDefs.filter((t) => ["read", "glob", "grep", "ls", "task", "submit_to_coder", "steer"].includes(t.id))
     const coderToolDefs = allToolDefs.filter((t) => !["submit_to_coder", "steer"].includes(t.id))
     const internToolDefs = allToolDefs.filter((t) => ["read", "glob", "grep"].includes(t.id))
+    const permissionRules: Record<string, Ruleset> = {
+      pm: fromConfig(cfg.permission?.pm ?? {}),
+      coder: fromConfig(cfg.permission?.coder ?? {}),
+      intern: fromConfig(cfg.permission?.intern ?? {}),
+    }
+    const rememberedPermission = new Set<string>()
+    let permissionQueue: Promise<void> = Promise.resolve()
 
     // Tracks submit_to_coder tool calls from PM → triggers phase transition
     let submittedPlan: { summary: string; approach: string } | null = null
 
     // PM auto-review + Steer state (continued)
     const steerQueue: Array<{ file: string; feedback: string; severity: string }> = []
+    let currentCoderExecution: CoderExecutionStats | null = null
 
     // ── Intern dispatch ──
     function dispatchIntern(description: string, prompt: string): Effect.Effect<string> {
@@ -138,11 +163,87 @@ export function runCommittee(opts?: {
       })
     }
 
+    function permissionTarget(defID: string, args: any): string {
+      if (defID === "shell") return String(args?.command ?? "*")
+      return String(args?.filePath ?? args?.path ?? args?.pattern ?? args?.description ?? "*")
+    }
+
+    async function requestToolPermission(label: string, defID: string, args: any): Promise<boolean> {
+      if (yoloMode) return true
+
+      const target = permissionTarget(defID, args)
+      const key = `${label}:${defID}:${target}`
+      const rules = permissionRules[label] ?? []
+      const decision = evaluate(defID, target, rules)
+
+      if (decision.action === "deny") {
+        w(`Permission denied by config: ${label}.${defID} ${target.slice(0, 80)}`, "warning")
+        return false
+      }
+      if (rememberedPermission.has(key)) return true
+
+      const message = [
+        `Agent: ${label}`,
+        `Tool: ${defID}`,
+        `Target: ${target}`,
+      ].join("  ·  ")
+      let result: any = null
+      const ask = permissionQueue.then(async () => {
+        result = await Tui.showSelect("Approve Tool Call", [
+          { label: "Yes", value: "yes" },
+          { label: "Yes, don't ask", value: "always" },
+          { label: "No", value: "no" },
+        ], message)
+      })
+      permissionQueue = ask.then(() => {}, () => {})
+      await ask
+
+      if (!result || result.value === "no") {
+        w(`Permission denied: ${label}.${defID} ${target.slice(0, 80)}`, "warning")
+        return false
+      }
+      if (result.value === "always") rememberedPermission.add(key)
+      return true
+    }
+
+    function recordCoderWriteResult(defID: string, args: any, ok: boolean, metadata: Record<string, unknown> = {}) {
+      if (!coderIsExecuting || (defID !== "write" && defID !== "edit")) return
+      const filePath = String(args?.filePath ?? "")
+      const pathLabel = filePath || "(unknown file)"
+
+      if (ok) {
+        coderFilesDone++
+        currentCoderExecution && currentCoderExecution.writeSuccess++
+        if (filePath && !coderProgress.completedFiles.includes(filePath)) coderProgress.completedFiles.push(filePath)
+        coderActions.push({
+          tool: defID,
+          path: filePath,
+          summary: String(metadata.title ?? `${defID} ${pathLabel}`).slice(0, 80),
+          ts: Date.now(),
+        })
+        return
+      }
+
+      currentCoderExecution && currentCoderExecution.writeFailed++
+      currentCoderExecution?.failedActions.push(`${defID} ${pathLabel}: ${String(metadata.error ?? metadata.denied ?? "failed")}`)
+      if (!coderProgress.failedFiles.includes(pathLabel)) coderProgress.failedFiles.push(pathLabel)
+    }
+
     function buildTools(defs: ToolDef[], label: string): Record<string, any> {
       const result: Record<string, any> = {}
       for (const def of defs) {
         result[def.id] = toAITool(def, async (args, callID) => {
           const argPath = (args as any)?.filePath ?? (args as any)?.pattern ?? (args as any)?.command ?? ""
+
+          const allowed = await requestToolPermission(label, def.id, args as any)
+          if (!allowed) {
+            if (label === "coder") recordCoderWriteResult(def.id, args as any, false, { error: "permission_denied" })
+            return {
+              output: `Permission denied for ${label}.${def.id}. Ask the user to approve the action or use a different approach.`,
+              title: `${def.id} denied`,
+              metadata: { denied: true, agent: label },
+            }
+          }
 
           if (label === "coder") {
             coderLastAction = def.id + " " + String(argPath).slice(0, 40)
@@ -157,7 +258,6 @@ export function runCommittee(opts?: {
                 w(`⚡ Coder applying steer: ${pendingSteer.file.slice(-30)}`, "warning")
                 w(`   ${pendingSteer.feedback.slice(0, 120)}`, "system")
               }
-              coderFilesDone++
             }
           }
 
@@ -169,13 +269,6 @@ export function runCommittee(opts?: {
           if (label !== "coder") {
             w("─".repeat(40), "system")
             w("🔧 " + toolTitle, "system")
-          }
-
-          // Check for submit_to_coder → transition to coder_review
-          if (def.id === "submit_to_coder") {
-            const summary = (args as any)?.summary ?? ""
-            const approach = (args as any)?.approach ?? ""
-            submittedPlan = { summary, approach }
           }
 
           // Check for steer tool → add to steer queue
@@ -217,21 +310,34 @@ export function runCommittee(opts?: {
               w("✓ " + String(r.output).slice(0, 120).replace(/\n/g, " "), "system")
             }
 
+            if (def.id === "submit_to_coder" && r.metadata?.submitted === true) {
+              submittedPlan = {
+                summary: String(r.metadata.summary ?? ""),
+                approach: String(r.metadata.approach ?? ""),
+              }
+            }
+
             // ── Log Coder actions for execution compaction ──
             if (label === "coder" && coderIsExecuting) {
               const actionPath = def.id === "task"
                 ? String((args as any)?.description ?? "").slice(0, 40)
                 : argPath
-              coderActions.push({
-                tool: def.id,
-                path: actionPath,
-                summary: r.title.slice(0, 80),
-                ts: Date.now(),
-              })
+              const isWriteEdit = def.id === "write" || def.id === "edit"
+              const ok = !r.metadata?.error && !r.metadata?.denied
+              if (isWriteEdit) {
+                recordCoderWriteResult(def.id, args as any, ok, { ...r.metadata, title: r.title })
+              } else {
+                coderActions.push({
+                  tool: def.id,
+                  path: actionPath,
+                  summary: r.title.slice(0, 80),
+                  ts: Date.now(),
+                })
+              }
             }
 
             // ── After Coder writes a file → fork PM auto-review (execution only) ──
-            if (label === "coder" && (def.id === "write" || def.id === "edit") && coderIsExecuting) {
+            if (label === "coder" && (def.id === "write" || def.id === "edit") && coderIsExecuting && !r.metadata?.error && !r.metadata?.denied) {
               const filePath = (args as any)?.filePath ?? ""
               if (filePath && pmReviewEnabled && plan) {
                 Effect.runFork(reviewFile(filePath))
@@ -242,6 +348,7 @@ export function runCommittee(opts?: {
           } catch (err: any) {
             const msg = err?.message ?? String(err)
             if (label !== "coder") w("✗ " + msg.slice(0, 80), "error")
+            if (label === "coder") recordCoderWriteResult(def.id, args as any, false, { error: msg })
             return { output: "Tool error: " + msg, title: def.id + " error", metadata: { error: msg } }
           }
         })
@@ -315,13 +422,21 @@ export function runCommittee(opts?: {
       })
     }
 
-    // Drain a Coder stream, tracking token usage for the status bar.
-    // No overflow detection — Coder follows a fixed plan, its context
-    // won't explode before the model's output limit is hit.
-    function drainCoderStream(s: Stream.Stream<any, any>): Effect.Effect<void> {
+    // Drain a Coder stream, tracking token usage and the real execution outcome.
+    function drainCoderStream(s: Stream.Stream<any, any>): Effect.Effect<CoderExecutionStats> {
       return Effect.gen(function* () {
+        const stats: CoderExecutionStats = currentCoderExecution ?? {
+          writeSuccess: 0,
+          writeFailed: 0,
+          text: "",
+          aborted: false,
+          failedActions: [],
+        }
         yield* s.pipe(
           Stream.tap((e: any) => Effect.sync(() => {
+            if (e?.type === "text-delta") {
+              stats.text += e.text ?? ""
+            }
             if (e?.type === "finish-step" && (e as any).usage) {
               const u = (e as any).usage
               const stepTotal = (u.inputTokens ?? 0) + (u.outputTokenDetails?.textTokens ?? u.outputTokens ?? 0)
@@ -335,12 +450,16 @@ export function runCommittee(opts?: {
           Stream.runDrain,
           Effect.catchCause((cause) => Effect.sync(() => {
             const err = Cause.squash(cause)
-            if (!isAborted(err)) {
-              const msg = err instanceof Error ? err.message : String(err)
-              w(`✗ Coder execution error: ${msg.slice(0, 200)}`, "error")
+            if (isAborted(err)) {
+              stats.aborted = true
+              return
             }
+            const msg = err instanceof Error ? err.message : String(err)
+            stats.error = msg
+            w(`✗ Coder execution error: ${msg.slice(0, 200)}`, "error")
           })),
         )
+        return stats
       })
     }
 
@@ -400,14 +519,44 @@ export function runCommittee(opts?: {
     // Coder execution action log — preserved across compaction restarts
     const coderActions: Array<{ tool: string; path: string; summary: string; ts: number }> = []
     const history: ModelMessage[] = []
+    const persistedMessages = yield* session.messages(mainSession.id)
+    for (const msg of persistedMessages) {
+      const text = msg.parts
+        .filter((p: any) => p.type === "text")
+        .map((p: any) => p.text)
+        .join("\n")
+      if (text) history.push({ role: msg.role, content: text } as ModelMessage)
+    }
     let coderSessionID: string | undefined
+
+    function persistChat(role: "user" | "assistant", content: string, agent = "pm"): Effect.Effect<void> {
+      const id = randomUUID()
+      return session.appendMessage({
+        id,
+        role,
+        sessionID: mainSession.id,
+        agent,
+        model: { providerID: agent, modelID: agent === "coder" ? cfg.models.coder.model : cfg.models.pm.model },
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        time: { created: Date.now(), completed: Date.now() },
+        finish: "stop",
+        parts: [{
+          type: "text",
+          id: randomUUID(),
+          sessionID: mainSession.id,
+          messageID: id,
+          text: content,
+        }],
+      } as any)
+    }
 
     const cmdCtx = {
       state: {
         pmModel: cfg.models.pm.model, coderModel: cfg.models.coder.model, internModel: cfg.models.intern?.model,
         phase: "idle" as CommitteePhase, progress: coderProgress, compactionCount: 0, tokenUsage: 0, totalCost: 0,
         contextLimit: cfg.committee?.compaction?.contextLimit ?? 200000,
-        currentPlan: undefined as PlanArtifact | undefined, theme: "dark-default",
+        currentPlan: undefined as PlanArtifact | undefined, theme: "dark-default", yolo: yoloMode,
       } as any, setState: () => {},
       dispatch: (a: string, payload?: unknown) => {
         if (a === "exit") { Tui.cleanup(); process.exit(0) }
@@ -424,6 +573,7 @@ export function runCommittee(opts?: {
         }
         if (a === "model_changed") { showHeader() }
         if (a === "pmreview") { pmReviewEnabled = payload as boolean; w(`PM auto-review: ${pmReviewEnabled ? "ON" : "OFF"}`, "command") }
+        if (a === "yolo") { yoloMode = payload as boolean; cmdCtx.state.yolo = yoloMode; w(`YOLO mode: ${yoloMode ? "ON" : "OFF"}`, "command") }
         if (a === "maxinterns") { maxInterns = Math.max(1, (payload as number) || 1); w(`Max Intern batch: ${maxInterns}`, "command") }
         if (a === "set_context_limit") { contextLimit = (payload as number) || contextLimit; cmdCtx.state.contextLimit = contextLimit }
         if (a === "show_reasoning") {
@@ -446,6 +596,21 @@ export function runCommittee(opts?: {
         if (a === "force_planning") phase = "idle"
       },
     } as any
+
+    async function missingPlannedFiles(): Promise<string[]> {
+      const files = (plan?.files ?? [])
+        .map((f) => f.path)
+        .filter((p) => p && !p.includes("*"))
+      const missing: string[] = []
+      for (const file of files) {
+        try {
+          await fs.access(path.resolve(cwd, file))
+        } catch {
+          missing.push(file)
+        }
+      }
+      return missing
+    }
 
     // ── Header (re-callable to reflect model changes) ──
     function showHeader() {
@@ -591,6 +756,7 @@ export function runCommittee(opts?: {
 
           // ── PM chat ──
           history.push({ role: "user", content: raw })
+          yield* persistChat("user", raw)
           w(userEcho(raw), "user")
 
           const pmTime = new Date().toLocaleTimeString()
@@ -621,6 +787,7 @@ export function runCommittee(opts?: {
           w(text, "pm")
           w("")
           history.push({ role: "assistant", content: text })
+          yield* persistChat("assistant", text)
 
           yield* maybeCompact
 
@@ -630,10 +797,11 @@ export function runCommittee(opts?: {
             submittedPlan = null
             w("◆ Submitting to Coder for review...", "pm-header")
             w("")
+            const parsed = parsePlan(sp.approach)
             plan = {
               summary: sp.summary,
               approach: sp.approach,
-              files: [], risks: [], alternatives: [],
+              files: parsed.files, risks: parsed.risks, alternatives: parsed.alternatives,
             }
             phase = "coder_review"
           }
@@ -729,6 +897,8 @@ export function runCommittee(opts?: {
 
             history.push({ role: "assistant", content: pmResp })
             history.push({ role: "user", content: coderResp })
+            yield* persistChat("assistant", pmResp)
+            yield* persistChat("user", coderResp, "coder")
 
             yield* maybeCompact
 
@@ -761,6 +931,7 @@ export function runCommittee(opts?: {
             w("Enter your revision notes:", "system")
             const input = yield* readUserInput()
             history.push({ role: "user", content: `Revise: ${input}` })
+            yield* persistChat("user", `Revise: ${input}`)
             phase = "idle"
           }
           break
@@ -785,6 +956,7 @@ export function runCommittee(opts?: {
             w("Enter your guidance:", "system")
             const input = yield* readUserInput()
             history.push({ role: "user", content: input })
+            yield* persistChat("user", input)
             coderLastAction = "idle"
             phase = "idle"
           }
@@ -819,6 +991,7 @@ export function runCommittee(opts?: {
             w("◆ CODER executing (watch tools below)", "pm-header")
 
             coderActions.length = 0
+            currentCoderExecution = { writeSuccess: 0, writeFailed: 0, text: "", aborted: false, failedActions: [] }
             const coderExecStream = llm.stream({
               sessionID: coderSessionID ?? "coder",
               agent: { name: "coder", temperature: cfg.models.coder.temperature ?? 0.5 },
@@ -827,34 +1000,73 @@ export function runCommittee(opts?: {
               maxOutputTokens: cfg.models.coder.maxTokens ?? 200000,
               abortSignal: Tui.coderAbortSignal(),
             })
-            yield* drainCoderStream(coderExecStream)
+            const execResult = yield* drainCoderStream(coderExecStream)
             Tui.clearCoderAbort()
 
-            coderLastAction = "summarizing..."
-            coderStartedAt = Date.now()
+            const missingFiles = yield* Effect.promise(() => missingPlannedFiles())
+            const canSummarize = !execResult.aborted && !execResult.error && execResult.writeSuccess > 0
 
-            // ── Coder summary — one final message to the Coder model ──
-            const summaryStream = llm.stream({
-              sessionID: coderSessionID ?? "coder",
-              agent: { name: "coder", temperature: 0.3 },
-              model: yield* getCoderModel(), system: coderEnv,
-              messages: [
-                ...execMessages.slice(-3),
-                { role: "assistant", content: "I have finished writing all the files." } as any,
-                { role: "user", content: "Output a brief, casual summary of what you just implemented. 2-4 bullet points. End with a short sign-off like 'All done!' or 'That should fix it!'. Do NOT output code." } as any,
-              ],
-              tools: {}, maxOutputTokens: 512,
-            })
-            const summary = yield* collectText(summaryStream, "coder")
+            let summary = ""
+            if (canSummarize) {
+              coderLastAction = "summarizing..."
+              coderStartedAt = Date.now()
+
+              const actionSummary = coderActions
+                .filter((a) => a.tool === "write" || a.tool === "edit")
+                .map((a) => `- ${a.tool} ${a.path}: ${a.summary}`)
+                .join("\n")
+              const failedSummary = execResult.failedActions.map((a) => `- ${a}`).join("\n")
+
+              // ── Coder summary — grounded only in successful tool actions ──
+              const summaryStream = llm.stream({
+                sessionID: coderSessionID ?? "coder",
+                agent: { name: "coder", temperature: 0.3 },
+                model: yield* getCoderModel(), system: coderEnv,
+                messages: [
+                  ...execMessages.slice(-3),
+                  {
+                    role: "user",
+                    content: [
+                      "Summarize only the successful file write/edit actions listed below.",
+                      "Do not claim the full plan is complete unless the listed actions prove it.",
+                      execResult.writeFailed > 0 ? `${execResult.writeFailed} write/edit action(s) failed. Mention that the result may be partial if relevant.` : "",
+                      missingFiles.length ? `Planned files not found after execution: ${missingFiles.join(", ")}` : "",
+                      "",
+                      "Successful actions:",
+                      actionSummary || "No successful file write/edit actions were recorded.",
+                      failedSummary ? "\nFailed actions:\n" + failedSummary : "",
+                      "",
+                      "Output 2-4 concise bullets. Do NOT output code.",
+                    ].filter(Boolean).join("\n"),
+                  } as any,
+                ],
+                tools: {}, maxOutputTokens: 512,
+              })
+              summary = yield* collectText(summaryStream, "coder")
+            } else {
+              const reasons = [
+                execResult.aborted ? "Coder execution aborted." : "",
+                execResult.error ? `Coder execution failed: ${execResult.error}` : "",
+                execResult.writeSuccess === 0 ? "No file writes were completed." : "",
+                execResult.writeFailed > 0 ? `${execResult.writeFailed} write/edit action(s) failed.` : "",
+                execResult.text.trim() ? `Coder final response:\n${execResult.text.trim()}` : "",
+              ].filter(Boolean)
+              summary = reasons.join("\n")
+            }
 
             coderLastAction = "done"
             coderStartedAt = 0
             coderIsExecuting = false
+            currentCoderExecution = null
             setTimeout(() => { coderLastAction = "idle"; coderTokens = 0 }, 8000)
 
             w("─".repeat(60), "system")
             w("● Coder · " + new Date().toLocaleTimeString(), "coder")
             w(summary, "pm")
+            yield* persistChat("assistant", summary, "coder")
+            if (missingFiles.length) {
+              w(`⚠ Planned files missing after execution: ${missingFiles.join(", ")}`, "warning")
+            }
             w("─".repeat(60), "system")
             try {
               const { stdout: statOut } = yield* Effect.promise(() => runGit(["diff", "--stat"], cwd))

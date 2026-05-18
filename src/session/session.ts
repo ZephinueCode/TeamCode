@@ -1,5 +1,7 @@
 import { Effect, Layer, Context } from "effect"
 import { randomUUID } from "crypto"
+import * as fs from "fs/promises"
+import path from "path"
 import type { WithParts } from "./message"
 
 export interface SessionInfo {
@@ -16,7 +18,7 @@ export interface SessionInfo {
 }
 
 export interface Interface {
-  readonly create: (input: { parentID?: string; title: string; agent: string; directory: string; modelProvider: string; modelID: string }) => Effect.Effect<SessionInfo>
+  readonly create: (input: { id?: string; parentID?: string; title: string; agent: string; directory: string; modelProvider: string; modelID: string }) => Effect.Effect<SessionInfo>
   readonly get: (id: string) => Effect.Effect<SessionInfo | undefined>
   readonly list: (directory?: string) => Effect.Effect<SessionInfo[]>
   readonly messages: (sessionID: string) => Effect.Effect<WithParts[]>
@@ -27,15 +29,48 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@teamcode/Session") {}
 
+interface SessionStore {
+  sessions: SessionInfo[]
+  messages: Record<string, WithParts[]>
+}
+
+const STORE_FILE = path.join(process.cwd(), ".teamcode", "sessions.json")
+
+async function loadStore(): Promise<SessionStore> {
+  try {
+    const text = await fs.readFile(STORE_FILE, "utf-8")
+    const parsed = JSON.parse(text) as Partial<SessionStore>
+    return {
+      sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [],
+      messages: parsed.messages && typeof parsed.messages === "object" ? parsed.messages : {},
+    }
+  } catch {
+    return { sessions: [], messages: {} }
+  }
+}
+
+async function saveStore(store: SessionStore): Promise<void> {
+  await fs.mkdir(path.dirname(STORE_FILE), { recursive: true })
+  await fs.writeFile(STORE_FILE, JSON.stringify(store, null, 2), "utf-8")
+}
+
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
-    const sessions = new Map<string, SessionInfo>()
-    const messages = new Map<string, WithParts[]>()
+    const store = yield* Effect.promise(() => loadStore())
+    const sessions = new Map<string, SessionInfo>(store.sessions.map((s) => [s.id, s]))
+    const messages = new Map<string, WithParts[]>(Object.entries(store.messages))
+
+    const persist = () => saveStore({
+      sessions: Array.from(sessions.values()),
+      messages: Object.fromEntries(messages.entries()),
+    })
 
     return Service.of({
       create: Effect.fn("Session.create")(function* (input) {
-        const id = randomUUID()
+        const id = input.id ?? randomUUID()
+        const existing = sessions.get(id)
+        if (existing) return existing
         const now = Date.now()
         const info: SessionInfo = {
           id, parentID: input.parentID, title: input.title,
@@ -46,6 +81,7 @@ export const layer = Layer.effect(
         }
         sessions.set(id, info)
         messages.set(id, [])
+        yield* Effect.promise(persist)
         return info
       }),
 
@@ -65,6 +101,9 @@ export const layer = Layer.effect(
         const msgs = messages.get(msg.sessionID) ?? []
         msgs.push(msg)
         messages.set(msg.sessionID, msgs)
+        const s = sessions.get(msg.sessionID)
+        if (s) s.time.updated = Date.now()
+        yield* Effect.promise(persist)
       }),
 
       updateMessage: Effect.fn("Session.update")(function* (msg) {
@@ -73,11 +112,15 @@ export const layer = Layer.effect(
         if (idx >= 0) msgs[idx] = msg
         else msgs.push(msg)
         messages.set(msg.sessionID, msgs)
+        const s = sessions.get(msg.sessionID)
+        if (s) s.time.updated = Date.now()
+        yield* Effect.promise(persist)
       }),
 
       touch: Effect.fn("Session.touch")(function* (id) {
         const s = sessions.get(id)
         if (s) s.time.updated = Date.now()
+        yield* Effect.promise(persist)
       }),
     })
   }),

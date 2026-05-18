@@ -2,6 +2,7 @@ import { Effect, Layer, Context } from "effect"
 import * as fs from "fs/promises"
 import path from "path"
 import { spawn } from "cross-spawn"
+import { randomUUID } from "crypto"
 
 export interface Patch {
   hash: string
@@ -40,18 +41,35 @@ export const layer = Layer.effect(
       }),
 
       track: Effect.fn("Snapshot.track")(function* () {
-        yield* Effect.promise(() => runGit(["add", "-A", "--", "."], cwd))
-        const result = yield* Effect.promise(() => runGit(["write-tree"], cwd))
-        return result.stdout?.trim() || undefined
+        const snapDir = path.join(cwd, ".teamcode", "snapshots")
+        yield* Effect.promise(() => fs.mkdir(snapDir, { recursive: true }))
+
+        const id = randomUUID()
+        const diff = yield* Effect.promise(() => runGit(["diff", "--binary", "HEAD", "--", "."], cwd))
+        const changed = yield* Effect.promise(() => runGit(["diff", "--name-only", "HEAD", "--", "."], cwd))
+        const untracked = yield* Effect.promise(() => runGit(["ls-files", "--others", "--exclude-standard"], cwd))
+        const files = Array.from(new Set([
+          ...changed.stdout.trim().split("\n").filter(Boolean),
+          ...untracked.stdout.trim().split("\n").filter(Boolean),
+        ])).sort()
+
+        yield* Effect.promise(() => fs.writeFile(
+          path.join(snapDir, `${id}.json`),
+          JSON.stringify({ id, files, diff: diff.stdout, time: Date.now() }, null, 2),
+          "utf-8",
+        ))
+        return id
       }),
 
       patch: Effect.fn("Snapshot.patch")(function* (hash) {
         if (!hash) return { hash: "", files: [] }
-        const result = yield* Effect.promise(() =>
-          runGit(["diff-tree", "--name-only", "-r", hash, "HEAD"], cwd),
-        )
-        const files = result.stdout.trim().split("\n").filter(Boolean)
-        return { hash, files }
+        try {
+          const text = yield* Effect.promise(() => fs.readFile(path.join(cwd, ".teamcode", "snapshots", `${hash}.json`), "utf-8"))
+          const parsed = JSON.parse(text) as { files?: string[] }
+          return { hash, files: parsed.files ?? [] }
+        } catch {
+          return { hash, files: [] }
+        }
       }),
     })
   }),

@@ -39,7 +39,11 @@ export function define(
   // Generate JSON Schema eagerly if the tool provides Schema parameters
   let jsonSchema: JSONSchema7 | undefined
   if (typeof def === "object" && def.parameters && typeof def.parameters === "object") {
-    try { jsonSchema = fromSchema(def.parameters) } catch {}
+    try {
+      jsonSchema = isJsonSchema(def.parameters)
+        ? def.parameters as JSONSchema7
+        : fromSchema(def.parameters)
+    } catch {}
   }
 
   const info: Info = {
@@ -57,4 +61,10 @@ export function define(
 
 export function init(info: Info): Effect.Effect<Def, never, never> {
   return info.init()
+}
+
+function isJsonSchema(value: unknown): value is JSONSchema7 {
+  return typeof value === "object"
+    && value !== null
+    && ("type" in value || "properties" in value || "required" in value || "$schema" in value)
 }

@@ -19,7 +19,7 @@ function wildcardMatch(pattern: string, input: string): boolean {
 export function evaluate(tool: string, pattern: string, ruleset: Ruleset): { action: Action } {
   for (let i = ruleset.length - 1; i >= 0; i--) {
     const rule = ruleset[i]!
-    if (rule.permission === tool && wildcardMatch(rule.pattern, pattern)) {
+    if ((rule.permission === tool || rule.permission === "*") && wildcardMatch(rule.pattern, pattern)) {
       return { action: rule.action }
     }
   }
