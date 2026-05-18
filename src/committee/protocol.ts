@@ -39,6 +39,8 @@ export interface PlanArtifact {
   summary: string
   approach: string
   files: Array<{ path: string; action: "create" | "modify" | "delete"; description: string }>
+  acceptanceCriteria?: string[]
+  verification?: string[]
   risks: string[]
   alternatives: Array<{ description: string; pros: string[]; cons: string[] }>
   // The PM can request specific Intern tasks as part of the plan

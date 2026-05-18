@@ -106,7 +106,7 @@ export function runCommittee(opts?: {
     let permissionQueue: Promise<void> = Promise.resolve()
 
     // Tracks submit_to_coder tool calls from PM → triggers phase transition
-    let submittedPlan: { summary: string; approach: string } | null = null
+    let submittedPlan: PlanArtifact | null = null
 
     // PM auto-review + Steer state (continued)
     const steerQueue: Array<{ file: string; feedback: string; severity: string }> = []
@@ -311,9 +311,15 @@ export function runCommittee(opts?: {
             }
 
             if (def.id === "submit_to_coder" && r.metadata?.submitted === true) {
+              const fallback = parsePlan(String(r.metadata.approach ?? ""))
               submittedPlan = {
                 summary: String(r.metadata.summary ?? ""),
                 approach: String(r.metadata.approach ?? ""),
+                files: Array.isArray(r.metadata.files) ? r.metadata.files as PlanArtifact["files"] : fallback.files,
+                acceptanceCriteria: Array.isArray(r.metadata.acceptanceCriteria) ? r.metadata.acceptanceCriteria as string[] : fallback.acceptanceCriteria,
+                verification: Array.isArray(r.metadata.verification) ? r.metadata.verification as string[] : fallback.verification,
+                risks: Array.isArray(r.metadata.risks) ? r.metadata.risks as string[] : fallback.risks,
+                alternatives: fallback.alternatives,
               }
             }
 
@@ -612,6 +618,28 @@ export function runCommittee(opts?: {
       return missing
     }
 
+    function renderPlanForCoder(p: PlanArtifact | undefined): string {
+      if (!p) return "(implement the changes discussed)"
+      return [
+        `Summary: ${p.summary}`,
+        ``,
+        `Approach:`,
+        p.approach,
+        ``,
+        `Files:`,
+        ...(p.files.length ? p.files.map((f) => `- ${f.action} ${f.path}: ${f.description}`) : [`- none listed`]),
+        ``,
+        `Acceptance Criteria:`,
+        ...((p.acceptanceCriteria?.length ? p.acceptanceCriteria : ["not specified"]).map((c) => `- ${c}`)),
+        ``,
+        `Verification:`,
+        ...((p.verification?.length ? p.verification : ["not specified"]).map((v) => `- ${v}`)),
+        ``,
+        `Risks:`,
+        ...((p.risks.length ? p.risks : ["none stated"]).map((r) => `- ${r}`)),
+      ].join("\n")
+    }
+
     // ── Header (re-callable to reflect model changes) ──
     function showHeader() {
       const pmCfg = runtimeConfig.get("pm", cfg.models.pm)
@@ -792,17 +820,21 @@ export function runCommittee(opts?: {
           yield* maybeCompact
 
           // submit_to_coder tool was called → transition to coder_review
-          if (submittedPlan) {
-            const sp: { summary: string; approach: string } = submittedPlan
+          const sp = submittedPlan as PlanArtifact | null
+          if (sp) {
             submittedPlan = null
             w("◆ Submitting to Coder for review...", "pm-header")
             w("")
-            const parsed = parsePlan(sp.approach)
             plan = {
               summary: sp.summary,
               approach: sp.approach,
-              files: parsed.files, risks: parsed.risks, alternatives: parsed.alternatives,
+              files: sp.files,
+              acceptanceCriteria: sp.acceptanceCriteria,
+              verification: sp.verification,
+              risks: sp.risks,
+              alternatives: sp.alternatives,
             }
+            cmdCtx.state.currentPlan = plan
             phase = "coder_review"
           }
           break
@@ -826,7 +858,7 @@ export function runCommittee(opts?: {
           const coderMessages: ModelMessage[] = [
             ...history.slice(-6),
             { role: "system", content: "You are in review phase. Move fast — your goal is to catch blockers, not to perfect the plan. Spend 2-3 minutes max. Check 2-3 key files with grep/read, then decide." },
-            { role: "user", content: `Review this plan:\n\n${plan?.approach || plan?.summary || "(see conversation above)"}\n\nBe decisive. Do not read exhaustively — spot-check file paths and approach. If the general direction is sound, approve it. Only push back on real problems (wrong file, missing edge case, architectural risk). Minor issues can be fixed during execution.\n\nOutput format:\nOverall: agree / agree_with_changes / disagree\nComments (blockers only, skip if none):\n- topic: your assessment — severity: blocker | suggestion` },
+            { role: "user", content: `Review this structured plan:\n\n${renderPlanForCoder(plan)}\n\nBe decisive. Do not read exhaustively — spot-check file paths and approach. If the general direction is sound, approve it. Only push back on real problems (wrong file, missing edge case, architectural risk). Minor issues can be fixed during execution.\n\nOutput format:\nOverall: agree / agree_with_changes / disagree\nComments (blockers only, skip if none):\n- topic: your assessment — severity: blocker | suggestion` },
           ]
 
           const coderReviewStream = llm.stream({
@@ -975,7 +1007,7 @@ export function runCommittee(opts?: {
 
           // Always inject the plan explicitly — history may not contain it
           // after compaction, and the Coder needs precise instructions.
-          const planText = plan?.approach || plan?.summary || "(implement the changes discussed)"
+          const planText = renderPlanForCoder(plan)
           const execMessages: ModelMessage[] = [
             ...history.slice(-4),
             { role: "system", content: `Plan to implement:\n${planText}\n\nExecution phase. Use write for new files, edit for changes. Read each file before editing. Write every file mentioned in the plan.` },
@@ -1138,7 +1170,25 @@ function parsePlan(text: string): PlanArtifact {
   const files: PlanArtifact["files"] = []
   const fileSec = text.match(/## Files\s*\n([\s\S]*?)(?=##|$)/)
   if (fileSec) for (const line of fileSec[1]!.split("\n")) { const m = line.match(/[-*]\s+(?:`)?([^`\s]+)(?:`)?\s+(?:\((\w+)\))?\s*(?:—|–|-)?\s*(.*)/); if (m) files.push({ path: m[1]!, action: (m[2] as any) ?? "modify", description: m[3] ?? "" }) }
-  return { summary: text.match(/## Summary\s*\n(.+)/)?.[1]?.trim() ?? "", approach: text.match(/## Approach\s*\n([\s\S]*?)(?=##|$)/)?.[1]?.trim() ?? "", files, risks: [], alternatives: [] }
+  return {
+    summary: text.match(/## Summary\s*\n(.+)/)?.[1]?.trim() ?? "",
+    approach: text.match(/## Approach\s*\n([\s\S]*?)(?=##|$)/)?.[1]?.trim() ?? text,
+    files,
+    acceptanceCriteria: parseListSection(text, "Acceptance Criteria"),
+    verification: parseListSection(text, "Verification"),
+    risks: parseListSection(text, "Risks"),
+    alternatives: [],
+  }
+}
+
+function parseListSection(text: string, heading: string): string[] {
+  const re = new RegExp(`## ${heading}\\s*\\n([\\s\\S]*?)(?=##|$)`, "i")
+  const section = text.match(re)?.[1]
+  if (!section) return []
+  return section
+    .split("\n")
+    .map((line) => line.replace(/^[-*]\s+/, "").trim())
+    .filter(Boolean)
 }
 
 function parseReview(text: string): ReviewArtifact {
