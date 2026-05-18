@@ -585,6 +585,9 @@ export function runCommittee(opts?: {
           const range = typeof payload === "number" ? { start: 1, end: payload } : (payload as { start: number; end: number }) ?? { start: 1, end: 50 }
           Tui.copyMessages(range).then((msg: string) => w(msg, "command")).catch(() => {})
         }
+        if (a === "status") {
+          w(buildStatus(), "command")
+        }
         if (a === "model_changed") { showHeader() }
         if (a === "pmreview") { pmReviewEnabled = payload as boolean; w(`PM auto-review: ${pmReviewEnabled ? "ON" : "OFF"}`, "command") }
         if (a === "yolo") { yoloMode = payload as boolean; cmdCtx.state.yolo = yoloMode; w(`YOLO mode: ${yoloMode ? "ON" : "OFF"}`, "command") }
@@ -760,6 +763,51 @@ export function runCommittee(opts?: {
     let internThinking = false
     let internStartedAt = 0
     let internDescription = ""
+
+    function formatDuration(start: number): string {
+      if (!start) return "0s"
+      const elapsed = Math.max(0, Math.floor((Date.now() - start) / 1000))
+      const min = Math.floor(elapsed / 60)
+      const sec = elapsed % 60
+      return min > 0 ? `${min}m ${sec}s` : `${sec}s`
+    }
+
+    function formatTokens(tokens: number): string {
+      return tokens > 0 ? `${(tokens / 1000).toFixed(1)}k` : "0k"
+    }
+
+    function buildStatus(): string {
+      const pmCfg = runtimeConfig.get("pm", cfg.models.pm)
+      const coderCfg = runtimeConfig.get("coder", cfg.models.coder)
+      const internCfg = cfg.models.intern
+      const internModel = internCfg?.endpoint && internCfg.model ? internCfg.model : pmCfg.model
+      const active = pmThinking && pmStartedAt > 0
+        ? `PM thinking · ${formatDuration(pmStartedAt)} · ${formatTokens(pmTokens)}`
+        : internThinking && internStartedAt > 0
+          ? `Intern ${internDescription || "reading"} · ${formatDuration(internStartedAt)}`
+          : coderLastAction !== "idle"
+            ? `Coder ${coderLastAction} · ${formatDuration(coderStartedAt)} · ${formatTokens(coderTokens)}`
+            : "idle"
+      const planFiles = plan?.files?.length ?? 0
+      const acceptance = plan?.acceptanceCriteria?.length ?? 0
+      const verification = plan?.verification?.length ?? 0
+      const risks = plan?.risks?.length ?? 0
+      const writeActions = coderActions.filter((a) => a.tool === "write" || a.tool === "edit").length
+      const failed = coderProgress.failedFiles.length
+      const lastAction = coderActions.at(-1)
+      return [
+        `Phase: ${phase}`,
+        `Active: ${active}`,
+        `Plan: ${plan?.summary ?? "none yet"}`,
+        `Plan files: ${planFiles} | Acceptance ${acceptance} | Verification ${verification} | Risks ${risks}`,
+        `Actions: ${coderActions.length} total | Writes ${writeActions} | Failed ${failed}${lastAction ? ` | Last ${lastAction.tool} ${lastAction.path}` : ""}`,
+        `Runtime: PM review ${pmReviewEnabled ? "ON" : "OFF"} | YOLO ${yoloMode ? "ON" : "OFF"} | Max interns ${maxInterns}`,
+        `Models: PM ${pmCfg.model} | Coder ${coderCfg.model} | Intern ${internModel}`,
+        `Styles: PM ${agentStyles.pm} | Coder ${agentStyles.coder} | Intern ${agentStyles.intern}`,
+        `Context: ${formatTokens(totalTokensUsed)} / ${formatTokens(contextLimit)} | Compactions ${cmdCtx.state.compactionCount ?? 0}`,
+        `Session: ${mainSession.id} | ${cwd}`,
+      ].join("\n")
+    }
 
     function updateTuiStatus() {
       const spin = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"][Math.floor(Date.now() / 200) % 10]!

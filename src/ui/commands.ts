@@ -138,15 +138,8 @@ export const builtinCommands: SlashCommand[] = [
     name: "status",
     description: "Show committee status and progress",
     execute(_args, ctx) {
-      const p = ctx.state.progress
-      return [
-        `Phase: ${ctx.state.phase}`,
-        `Models: PM ${ctx.state.pmModel} | Coder ${ctx.state.coderModel} | Intern ${ctx.state.internModel ?? "n/a"}`,
-        `Styles: PM ${((ctx.state as any).styles?.pm ?? "balanced")} | Coder ${((ctx.state as any).styles?.coder ?? "balanced")} | Intern ${((ctx.state as any).styles?.intern ?? "balanced")}`,
-        `Permissions: ${(ctx.state as any).yolo ? "YOLO" : "approval required"}`,
-        `Files: ${p.completedFiles.length} done | ${p.currentFile ?? "—"} in progress | ${p.failedFiles.length} failed`,
-        `Compactions: ${ctx.state.compactionCount} | Tokens: ${Math.round(ctx.state.tokenUsage / 1000)}k`,
-      ].join("\n")
+      ctx.dispatch("status")
+      return ""
     },
   },
   {
