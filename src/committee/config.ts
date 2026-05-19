@@ -3,7 +3,7 @@ import { Schema } from "effect"
 export const ModelConfig = Schema.Struct({
   provider: Schema.String,
   model: Schema.String,
-  endpoint: Schema.String,
+  endpoint: Schema.optional(Schema.String),
   apiKey: Schema.optional(Schema.String),
   temperature: Schema.optional(Schema.Number),
   maxTokens: Schema.optional(Schema.Number),

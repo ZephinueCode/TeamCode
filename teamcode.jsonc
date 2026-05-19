@@ -1,84 +1,66 @@
 {
-  // ── 三模型配置 — 每个模型独立的 endpoint / model / apiKey ──
+  // ── Model Configuration ──
+  // Each role can use a different provider and model independently.
+  //
+  // Supported providers (auto-resolve endpoint + API key env var):
+  //   anthropic, openai, deepseek, openrouter, zenmux,
+  //   ollama, ollama-cloud, dashscope, together, fireworks
+  //
+  // Or use "openai-compatible" with a custom endpoint for any provider.
+  //
+  // API keys are resolved from environment variables automatically:
+  //   anthropic → ANTHROPIC_API_KEY
+  //   deepseek  → DEEPSEEK_API_KEY
+  //   openrouter → OPENROUTER_API_KEY
+  //   (etc.)
+  // Or set "apiKey" inline in the config.
+
   "models": {
     "pm": {
-      "provider": "openai-compatible",
+      "provider": "deepseek",
       "model": "deepseek-v4-pro",
-      "endpoint": "https://api.deepseek.com",
-      "apiKey": "${TEAMCODE_PM_API_KEY}",
       "temperature": 0.5,
       "maxTokens": 65536
     },
     "coder": {
-      "provider": "openai-compatible",
+      "provider": "deepseek",
       "model": "deepseek-v4-pro",
-      "endpoint": "https://api.deepseek.com",
-      "apiKey": "${TEAMCODE_CODER_API_KEY}",
-      "temperature": 0.5,
+      "temperature": 0.3,
       "maxTokens": 65536
     },
     "intern": {
-      "provider": "openai-compatible",
+      "provider": "deepseek",
       "model": "deepseek-v4-flash",
-      "endpoint": "https://api.deepseek.com",
-      "apiKey": "${TEAMCODE_INTERN_API_KEY}",
       "temperature": 0.1,
       "maxTokens": 16384
     }
   },
 
-  // ── 委员会协议 ──
+  // ── Example: Mix providers ──
+  // "models": {
+  //   "pm":    { "provider": "anthropic", "model": "claude-sonnet-4-6" },
+  //   "coder": { "provider": "deepseek", "model": "deepseek-v4-pro" },
+  //   "intern": { "provider": "ollama", "model": "qwen3:8b" }
+  // },
+
+  // ── Example: OpenRouter (one key, all models) ──
+  // "models": {
+  //   "pm":    { "provider": "openrouter", "model": "anthropic/claude-opus-4-6" },
+  //   "coder": { "provider": "openrouter", "model": "deepseek/deepseek-v4-pro" },
+  //   "intern": { "provider": "openrouter", "model": "google/gemini-3-flash" }
+  // },
+
+  // ── Committee Protocol ──
   "committee": {
-    "deliberation": {
-      "maxRounds": 3,
-      "mode": "consensus",
-      "timeout": 600000
-    },
-    "execution": {
-      "pmReview": "async",
-      "maxReviewRounds": 2,
-      "interruptOnBlocker": true,
-      "coderAutonomy": "full"
-    },
-    "compaction": {
-      "auto": true,
-      "tailTurns": 3,
-      "reservedTokens": 20000,
-      "contextLimit": 200000,   // 模型上下文窗口大小
-      "overflowRatio": 0.75,
-      "committeeTemplate": true
-    }
+    "deliberation": { "maxRounds": 3 },
+    "execution": { "pmReview": "async", "maxReviewRounds": 2, "coderAutonomy": "full" },
+    "compaction": { "auto": true, "contextLimit": 200000, "overflowRatio": 0.75 }
   },
 
-  // ── 权限 ──
+  // ── Permissions ──
   "permission": {
-    "pm": {
-      "read": "allow",
-      "glob": "allow",
-      "grep": "allow",
-      "skill": "allow",
-      "task": "allow",
-      "write": "deny",
-      "edit": "deny",
-      "shell": "deny"
-    },
-    "coder": {
-      "*": "allow"
-    },
-    "intern": {
-      "read": "allow",
-      "glob": "allow",
-      "grep": "allow",
-      "write": "deny",
-      "edit": "deny",
-      "shell": "deny",
-      "task": "deny"
-    }
-  },
-
-  // ── Skill 路径 ──
-  "skills": {
-    "paths": [".teamcode/skills"],
-    "urls": []
+    "pm": { "read": "allow", "glob": "allow", "grep": "allow", "task": "allow", "write": "deny", "edit": "deny", "shell": "deny" },
+    "coder": { "*": "allow" },
+    "intern": { "read": "allow", "glob": "allow", "grep": "allow", "write": "deny", "edit": "deny", "shell": "deny", "task": "deny" }
   }
 }

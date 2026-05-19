@@ -104,9 +104,7 @@ async function loadAllConfigs(cwd: string): Promise<CommitteeConfig> {
 
 function validateConfig(cfg: CommitteeConfig): string[] {
   const issues: string[] = []
-  if (!cfg.models.pm.endpoint) issues.push("pm.endpoint is empty — set it in teamcode.jsonc or ~/.teamcode/teamcode.jsonc")
   if (!cfg.models.pm.model) issues.push("pm.model is empty")
-  if (!cfg.models.coder.endpoint) issues.push("coder.endpoint is empty")
   if (!cfg.models.coder.model) issues.push("coder.model is empty")
   return issues
 }

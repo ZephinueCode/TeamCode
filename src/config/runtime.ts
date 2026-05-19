@@ -21,7 +21,7 @@ class RuntimeConfig {
     return {
       ...base,
       model: ov.model ?? base.model,
-      endpoint: ov.endpoint ?? base.endpoint,
+      endpoint: ov.endpoint ?? base.endpoint ?? "",
       apiKey: ov.apiKey ?? base.apiKey,
       temperature: ov.temperature ?? base.temperature,
       maxTokens: ov.maxTokens ?? base.maxTokens,
